@@ -380,12 +380,19 @@ function createWindow() {
   });
   // Alt+F4 / the taskbar's "Close window": same as the X button, hide to the tray, unless really quitting.
   mainWindow.on("close", (e) => {
-    // The service's host only shows its window for a request or a running session: closing it just hides it.
-    if (_serviceHost && !_quitting) { e.preventDefault(); mainWindow.hide(); return; }
+    // The service's host only shows its window for a request or a running session: Alt+F4 / the taskbar's Close act
+    // like its X (the page rejects the request or ends the session, then hides the window). It never quits.
+    if (_serviceHost && !_quitting) { e.preventDefault(); try { mainWindow.webContents.send("close-requested"); } catch { mainWindow.hide(); } return; }
     if (_quitting || !tray) return;
     e.preventDefault();
     try { mainWindow.webContents.send("close-requested"); } catch { mainWindow.hide(); }
   });
+  // The service's window is up (a request waiting, or a session): the user's own TryDesk steps aside meanwhile, so
+  // only one TryDesk window shows (see serviceSessionChanged).
+  if (_serviceHost) {
+    mainWindow.on("show", () => { _svcWinShown = true; writeServiceSession(true); });
+    mainWindow.on("hide", () => { _svcWinShown = false; writeServiceSession(_hostingNow); });
+  }
   // Only swallow keys while focused; on blur, stop swallowing AND release any held keys on the host so a
   // modifier can't get stuck down when the user clicks away mid-combo.
   mainWindow.on("focus", () => { _kbFocused = true; });
@@ -518,8 +525,8 @@ app.whenReady().then(async () => {
   let _hosting = false;
   ipcMain.on("hosting-state", (_e, on) => {
     _hosting = !!on; _trayHosting = _hosting; refreshTray();
-    if (_serviceHost) writeServiceSession(_hosting);
     _hostingNow = _hosting;
+    if (_serviceHost) writeServiceSession(_hosting || _svcWinShown);
     if (!_hosting && _adminWindow) { _adminWindow = false; try { mainWindow.webContents.send("host-admin-window", false); } catch {} }
   });
   // An admin window in front (Task Manager, admin CMD) blocks a non-elevated host's input and hides its cursor.
@@ -886,9 +893,17 @@ ipcMain.handle("service-set-password", async (_e, hash) => {
 // time it starts (the app then signs in with a second ID of its own, used only to control other PCs).
 const _identityFile = path.join(app.getPath("userData"), "identity.json");
 const ID_RE = /^\d{3} \d{3} \d{3}$/, TOKEN_RE = /^[0-9a-f]{16,128}$/i;
+const readIdentityFile = () => { try { const j = JSON.parse(fs.readFileSync(_identityFile, "utf8")); return j && typeof j === "object" ? j : {}; } catch { return {}; } };
 ipcMain.on("export-identity", (_e, v) => {
   if (_serviceHost || !v || !ID_RE.test(v.id) || !TOKEN_RE.test(v.token)) return;
-  try { fs.writeFileSync(_identityFile, JSON.stringify({ id: v.id, token: v.token })); } catch {}
+  const lang = readIdentityFile().lang;
+  try { fs.writeFileSync(_identityFile, JSON.stringify({ id: v.id, token: v.token, ...(lang ? { lang } : {}) })); } catch {}
+});
+// The language the user picked, kept in the same file: the service's window reads it (service-user-lang).
+ipcMain.on("export-ui-lang", (_e, l) => {
+  if (_serviceHost || (l !== "en" && l !== "id")) return;
+  const j = readIdentityFile(); if (j.lang === l) return;
+  try { fs.writeFileSync(_identityFile, JSON.stringify({ ...j, lang: l })); } catch {}
 });
 // The service's host reads it from the profile of the user in its session (passed by the service: --user-profile=).
 ipcMain.handle("service-user-identity", () => {
@@ -899,6 +914,13 @@ ipcMain.handle("service-user-identity", () => {
     const j = JSON.parse(fs.readFileSync(path.join(arg.slice(15), "AppData", "Roaming", "TryDesk", "identity.json"), "utf8"));
     return ID_RE.test(j.id) && TOKEN_RE.test(j.token) ? { id: j.id, token: j.token } : null;
   } catch { return null; }
+});
+// The language of the user in this session (see export-ui-lang); SYSTEM itself has none, so its window was English.
+ipcMain.handle("service-user-lang", () => {
+  if (!_serviceHost) return null;
+  const arg = process.argv.find((a) => a.startsWith("--user-profile="));
+  if (!arg) return null;
+  try { const l = JSON.parse(fs.readFileSync(path.join(arg.slice(15), "AppData", "Roaming", "TryDesk", "identity.json"), "utf8")).lang; return l === "en" || l === "id" ? l : null; } catch { return null; }
 });
 // A disconnected session (RDP window closed / disconnected) has no screen at all: Windows draws nothing, so there is
 // nothing to capture. The service's host (SYSTEM) moves its own session to the console, as `tscon <id> /dest:console`
@@ -934,7 +956,10 @@ ipcMain.on("service-id", (_e, id) => {
 // being controlled" on the right). While the PC has the service, a session is hosted by the service's window (SYSTEM),
 // so the user's own app steps aside: its window goes to the tray for the session and comes back after it, the way it
 // was. The service's host says when it hosts in a file users can read; the app watches it.
+// (8 Nov, owner's report with a picture: the app stayed next to the service's Accept dialog, because only a running
+// session counted. Now "hosting" means the service's window is up for any reason: a request waiting or a session.)
 const _serviceSessionFile = path.join(_serviceDir, "service-session.json");
+let _svcWinShown = false;   // service host: its window is on screen
 function writeServiceSession(on) {
   try { fs.writeFileSync(_serviceSessionFile, JSON.stringify({ hosting: !!on, pid: process.pid, at: Date.now() })); } catch {}
 }

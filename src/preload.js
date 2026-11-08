@@ -18,6 +18,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   serviceUserIdentity: () => ipcRenderer.invoke("service-user-identity"),
   serviceSetPassword: (hash) => ipcRenderer.invoke("service-set-password", String(hash || "")),
   exportIdentity: (id, token) => ipcRenderer.send("export-identity", { id: String(id || ""), token: String(token || "") }),
+  // The user's language, so the service's window (SYSTEM, which has no language of its own) speaks it too.
+  exportUiLang: (l) => ipcRenderer.send("export-ui-lang", l === "en" ? "en" : "id"),
+  serviceUserLang: () => ipcRenderer.invoke("service-user-lang"),
   getMonitors: () => ipcRenderer.invoke("get-monitors"),
   // Settings that act on the OS
   getLoginItem: () => ipcRenderer.invoke("get-login-item"),

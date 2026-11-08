@@ -343,8 +343,9 @@ html:not(.td-mobile) .sess-tab.active .sess-count { color: var(--accent-text); }
    this form, like a sign-in page: the ring, the heading and the steps make way. */
 .connecting-container:has(.connect-pw:not(.hidden)) > :is(.connect-anim, #connecting-title, #connecting-text, .connect-steps) { display: none; }
 /* The service's host window (SYSTEM, see main.js): only the Accept dialog and the "being controlled" screen. No home
-   screen behind the dialog, no settings, no sending files; closing it only hides it. */
-html.svc-host #screen-home > *, html.svc-host #btn-settings, html.svc-host #btn-maximize, html.svc-host #btn-close,
+   screen behind the dialog, no settings, no sending files. Maximize and X stay, as on every window (owner, 8 Nov: "can't
+   close it, can't maximize it, strange"): X is Reject while a request waits and Disconnect during a session. */
+html.svc-host #screen-home > *, html.svc-host #btn-settings,
 html.svc-host #btn-host-send-file { visibility: hidden; }
 html.svc-host #btn-host-send-file { display: none; }
 

@@ -261,6 +261,8 @@ function t(key) {
 function applyLanguage(l) {
   lang = (l === "en") ? "en" : "id";
   document.documentElement.setAttribute("lang", lang);
+  // Kept next to identity.json, for the service's window (see serviceFollowUserLang).
+  try { if (!(config && config.serviceHost)) window.electronAPI?.exportUiLang?.(lang); } catch {}
   // ID is the text authored in HTML; capture it once, then toggle to EN from the dictionary.
   $$("[data-i18n]").forEach((el) => {
     if (el._i18nId == null) el._i18nId = el.textContent;
@@ -2213,6 +2215,7 @@ async function finishAccept(fromId, viaPassword, fromName = "") {
     let cap = null, lastErr = null;
     // Service host in a disconnected session (RDP closed): nothing is drawn there; move it to the console first.
     if (config && config.serviceHost) {
+      await serviceFollowUserLang();   // a password session skips the Accept dialog: the language comes here then
       serviceShowWindow();   // "Remote session active" + Disconnect, as the normal app shows it
       try {
         const r = await window.electronAPI.serviceAttachConsole();
@@ -3531,6 +3534,13 @@ function showActiveVideo() {
 // The service's host window is hidden unless a request is waiting or a session runs (main.js, service-*-window).
 const serviceHideWindow = () => { try { window.electronAPI.serviceHideWindow(); } catch {} };
 const serviceShowWindow = () => { try { window.electronAPI.serviceShowWindow(); } catch {} };
+// SYSTEM has no language of its own, so the service's window was always English (owner's picture, 7 Nov): take the
+// language the user picked in their own TryDesk (main.js, export-ui-lang / service-user-lang).
+async function serviceFollowUserLang() {
+  if (!(config && config.serviceHost)) return;
+  let l = null; try { l = await window.electronAPI.serviceUserLang?.(); } catch {}
+  if ((l === "en" || l === "id") && l !== lang) { applyLanguage(l); $("#setting-language").value = l; }
+}
 
 // ─── Accept request (AnyDesk-style with countdown) ────────
 const ACCEPT_TIMEOUT = 30; // seconds
@@ -3558,8 +3568,11 @@ function askAccept(fromId, fromName, hint = "") {
     const alias = stripBidi(fromName).trim();   // the requester picks this text: no right-to-left tricks
     // Concept: one sentence that says who wants what ("Laptop-Ibu ingin mengontrol desktop ini.").
     // (This element is skipped by the EN text map because the name is the requester's text: build both languages here.)
-    { const named = alias && alias !== "TryDesk User";
-      aliasEl.textContent = lang === "en" ? `${named ? alias : "Someone"} wants to control this desktop.` : `${named ? alias : "Seseorang"} ingin mengontrol desktop ini.`; }
+    const setAlias = () => { const named = alias && alias !== "TryDesk User";
+      aliasEl.textContent = lang === "en" ? `${named ? alias : "Someone"} wants to control this desktop.` : `${named ? alias : "Seseorang"} ingin mengontrol desktop ini.`; };
+    setAlias();
+    // The service's window speaks the language of the user at this PC (picked in their own TryDesk).
+    if (config && config.serviceHost) serviceFollowUserLang().then(setAlias);
     // Settings → Umum → Notifikasi: tell the user even when TryDesk is behind other windows.
     if (!document.hasFocus() && prefGet("notifyIncoming")) {
       try { new Notification(tr("Permintaan koneksi masuk"), { body: (alias && alias !== "TryDesk User" ? alias + " · " : "") + fmtId(fromId), silent: !prefGet("notifySound") }); } catch {}
@@ -6440,6 +6453,13 @@ async function confirmQuit(fromTray) {
 // X (and Alt+F4 / the taskbar's Close): to the system tray like AnyDesk, sessions keep running, the PC stays
 // reachable. With that setting off, X quits as before. The phone app has no tray (and no X).
 async function onCloseButton() {
+  // The service's window only exists for a request or a session: X answers it (Reject / Disconnect), then it goes away.
+  if (config && config.serviceHost) {
+    if (acceptPending && acceptDlgCancel) acceptDlgCancel();
+    else if (host) closeSession(host, true);
+    else serviceHideWindow();
+    return;
+  }
   if (prefGet("closeToTray") && window.electronAPI.hideToTray) {
     const first = store.get("tipTray") !== "1";
     if (first) store.set("tipTray", "1");
@@ -6615,6 +6635,7 @@ $("#update-dismiss").addEventListener("click", () => { if (updateInfo) store.set
   const savedLang = store.get("lang") || (/^id\b/i.test(navigator.language || "") ? "id" : "en");
   $("#setting-language").value = savedLang;
   applyLanguage(savedLang);
+  if (config.serviceHost) serviceFollowUserLang();
   // Restore auto-reconnect
   autoReconnect = store.get("autoReconnect") === "1";
   $("#setting-auto-reconnect").checked = autoReconnect;
