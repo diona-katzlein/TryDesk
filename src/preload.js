@@ -39,6 +39,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   onFastCapturePacket: (cb) => ipcRenderer.on("fast-capture-packet", (_e, p) => cb(p)),
   onFastCaptureInfo: (cb) => ipcRenderer.on("fast-capture-info", (_e, s) => cb(String(s))),
   onFastCaptureEnded: (cb) => ipcRenderer.on("fast-capture-ended", (_e, d) => cb(d)),
+  // Service host: the secure desktop (UAC prompt, lock screen) has the input now (true) or not any more (false).
+  onSecureDesktop: (cb) => ipcRenderer.on("secure-desktop", (_e, on) => cb(!!on)),
   // Viewer end of the fast path's UDP link (Windows): frames arrive whole from the receiver helper.
   fastUdpRecvStart: (opts) => ipcRenderer.invoke("fast-udp-recv-start", { key: String(opts?.key || ""), port: Number(opts?.port) || 0, ips: Array.isArray(opts?.ips) ? opts.ips.map(String).slice(0, 8) : [] }),
   fastUdpRecvStop: () => ipcRenderer.send("fast-udp-recv-stop"),

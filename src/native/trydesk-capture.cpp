@@ -20,6 +20,13 @@
 //   with --udp (see trydesk-udp.h): {"cmd":"udpkey","hex":"<64 hex>"} | {"cmd":"peer","ip":"a.b.c.d","port":N} |
 //   {"cmd":"udp","on":0|1}. The info packet at start then carries "udpPort"; frames go out on UDP instead of
 //   stdout as soon as the viewer's receiver answers, and come back to stdout if it goes quiet.
+//   Input on the desktop this helper captures (the TryDesk service's host routes input here while the secure desktop
+//   is up): {"cmd":"in","t":"move","x":N,"y":N} (physical desktop pixels) | {"cmd":"in","t":"down"|"up","b":"left"|
+//   "right"|"middle"} | {"cmd":"in","t":"wheel","wy":N,"wx":N} (wheel units, 120 a notch) | {"cmd":"in","t":"key",
+//   "vk":N,"up":0|1}.
+// Secure desktop: the UAC prompt and the lock screen are a separate desktop ("Winlogon") that only SYSTEM can open.
+//   Run by the service's host (SYSTEM) this helper follows whichever desktop has the input; run as a user it can't,
+//   and behaves as before.
 // --recv --port N: the viewer end. No capture; receives frames on UDP and writes them to stdout as type 1 packets
 //   (flags bit1 = a frame before this one was lost). Same stdin commands (udpkey, peer, stop).
 // Exit codes: 0 stopped, 2 monitor not found, 3 capture lost (display change / secure desktop), 4 no hardware
@@ -58,6 +65,7 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "winmm.lib")
+#pragma comment(lib, "user32.lib")
 
 using Microsoft::WRL::ComPtr;
 using clk = std::chrono::steady_clock;
@@ -80,10 +88,53 @@ static int numberAfter(const std::string& s, const char* key) { auto p = s.find(
 static std::string stringAfter(const std::string& s, const char* key) { auto p = s.find(key); if (p == std::string::npos) return ""; p = s.find('"', s.find(':', p) + 1); if (p == std::string::npos) return ""; auto e = s.find('"', p + 1); return e == std::string::npos ? "" : s.substr(p + 1, e - p - 1); }
 // The UDP link (with --udp on the host, always on the viewer's --recv end); see trydesk-udp.h.
 static tdudp::Link g_link; static tdudp::Sender* g_sender = nullptr;
+
+// Attach the calling thread to the desktop that has the input now (Default, or Winlogon while a UAC prompt or the
+// lock screen is up). Only SYSTEM may open Winlogon; for anyone else this stays on Default. A thread with windows or
+// hooks can't move: this helper's capture and command threads have none. True when the thread moved.
+static bool followInputDesktop() {
+  thread_local HDESK mine = nullptr;
+  HDESK d = OpenInputDesktop(0, FALSE, GENERIC_ALL);
+  if (!d) return false;
+  wchar_t want[64] = L"", have[64] = L""; DWORD n = 0;
+  GetUserObjectInformationW(d, UOI_NAME, want, sizeof want, &n);
+  GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()), UOI_NAME, have, sizeof have, &n);
+  if (!_wcsicmp(want, have)) { CloseDesktop(d); return false; }
+  if (!SetThreadDesktop(d)) { CloseDesktop(d); return false; }
+  if (mine) CloseDesktop(mine);
+  mine = d;
+  return true;
+}
+// One input command from TryDesk, done on the input desktop (see the header).
+static void doInput(const std::string& s) {
+  followInputDesktop();
+  const std::string t = stringAfter(s, "\"t\"");
+  if (t == "move") { SetCursorPos(numberAfter(s, "\"x\""), numberAfter(s, "\"y\"")); return; }
+  if (t == "down" || t == "up") {
+    const std::string b = stringAfter(s, "\"b\""); const bool up = t == "up";
+    const DWORD f = b == "right" ? (up ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_RIGHTDOWN) : b == "middle" ? (up ? MOUSEEVENTF_MIDDLEUP : MOUSEEVENTF_MIDDLEDOWN) : (up ? MOUSEEVENTF_LEFTUP : MOUSEEVENTF_LEFTDOWN);
+    INPUT in = {}; in.type = INPUT_MOUSE; in.mi.dwFlags = f; SendInput(1, &in, sizeof in); return;
+  }
+  if (t == "wheel") {
+    const int wy = numberAfter(s, "\"wy\""), wx = numberAfter(s, "\"wx\"");
+    if (wy && wy != -1) { INPUT in = {}; in.type = INPUT_MOUSE; in.mi.dwFlags = MOUSEEVENTF_WHEEL; in.mi.mouseData = (DWORD)wy; SendInput(1, &in, sizeof in); }
+    if (wx && wx != -1) { INPUT in = {}; in.type = INPUT_MOUSE; in.mi.dwFlags = MOUSEEVENTF_HWHEEL; in.mi.mouseData = (DWORD)wx; SendInput(1, &in, sizeof in); }
+    return;
+  }
+  if (t == "key") {
+    const int vk = numberAfter(s, "\"vk\""); if (vk <= 0 || vk > 0xFE) return;
+    static const int ext[] = { 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E, 0x5B, 0x5C, 0x5D, 0x6F, 0x90 };
+    INPUT in = {}; in.type = INPUT_KEYBOARD; in.ki.wVk = (WORD)vk; in.ki.wScan = (WORD)(MapVirtualKeyW(vk, MAPVK_VK_TO_VSC) & 0xFF);
+    if (numberAfter(s, "\"up\"") == 1) in.ki.dwFlags |= KEYEVENTF_KEYUP;
+    for (int e : ext) if (e == vk) in.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    SendInput(1, &in, sizeof in);
+  }
+}
 static void readCommands() {
   char line[512];
   while (fgets(line, sizeof line, stdin)) {
     std::string s(line);
+    if (s.find("\"cmd\":\"in\"") != std::string::npos) { doInput(s); continue; }   // first: its "t":"key" isn't a keyframe ask
     if (s.find("\"stop\"") != std::string::npos) { g_stop = true; break; }
     else if (s.find("\"udpkey\"") != std::string::npos) {
       const std::string hex = stringAfter(s, "\"hex\""); std::vector<uint8_t> key;
@@ -208,6 +259,9 @@ int main(int argc, char** argv) {
     else if (!strcmp(argv[i], "--port")) port = std::max(0, std::min(65535, atoi(argv[i + 1])));
   }
   if (recv) return runRecv((uint16_t)port);
+  // Real pixels for SetCursorPos (input commands come in physical desktop pixels, as --rect does).
+  SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+  followInputDesktop();   // started while a UAC prompt is up: capture that desktop
   if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)) || FAILED(MFStartup(MF_VERSION))) quit(5, "com/mf startup");
   // 1 ms waits must really be 1 ms: with Windows' default 15.6 ms timer, the short waits between frames stretched and
   // held this at ~90 fps (measured). Applies to this process only, for as long as it runs (as games do).
@@ -224,6 +278,22 @@ int main(int argc, char** argv) {
       const bool match = rw > 0 ? (r.left == rx && r.top == ry && r.right - r.left == rw && r.bottom - r.top == rh)
                                 : (r.left == 0 && r.top == 0);   // no --rect: the primary monitor
       if (match && d.AttachedToDesktop) { adapter = ad; output = out; od = d; break; }
+    }
+  }
+  // No exact match: TryDesk converts the screen's position from scaled to real pixels, and with monitors at different
+  // scaling that can land a few pixels off. Take the monitor that covers most of the asked rectangle instead of
+  // quitting (a quit here, with TryDesk run as administrator, used to leave the viewer without any picture).
+  if (!output && rw > 0) {
+    LONGLONG best = 0;
+    for (UINT a = 0;; a++) {
+      ComPtr<IDXGIAdapter1> ad; if (factory->EnumAdapters1(a, &ad) == DXGI_ERROR_NOT_FOUND) break;
+      for (UINT o = 0;; o++) {
+        ComPtr<IDXGIOutput> out; if (ad->EnumOutputs(o, &out) == DXGI_ERROR_NOT_FOUND) break;
+        DXGI_OUTPUT_DESC d; out->GetDesc(&d); if (!d.AttachedToDesktop) continue;
+        const RECT& r = d.DesktopCoordinates;
+        const LONGLONG w = (LONGLONG)std::min<LONG>(r.right, rx + rw) - std::max<LONG>(r.left, rx), h = (LONGLONG)std::min<LONG>(r.bottom, ry + rh) - std::max<LONG>(r.top, ry);
+        if (w > 0 && h > 0 && w * h > best) { best = w * h; adapter = ad; output = out; od = d; }
+      }
     }
   }
   if (!output) quit(2, "monitor not found");
@@ -354,6 +424,8 @@ int main(int argc, char** argv) {
     // and calling AcquireNextFrame on it crashed the helper (0xC0000005, an RDP PC whose resolution changed).
     if (!dup) {
       Sleep(100);
+      // The input desktop may have changed (UAC prompt up or gone): duplicate the one that is shown now.
+      if (followInputDesktop()) { char d[64]; DWORD n = 0; wchar_t nm[32] = L""; GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()), UOI_NAME, nm, sizeof nm, &n); snprintf(d, sizeof d, "{\"desktop\":\"%ls\"}", nm); info(d); }
       if (FAILED(out1->DuplicateOutput(dev.Get(), &dup))) { dup.Reset(); if (++lostTries > 50) quit(3, "capture lost"); continue; }
       DXGI_OUTDUPL_DESC d2; dup->GetDesc(&d2); if ((d2.ModeDesc.Width & ~1u) != W || (d2.ModeDesc.Height & ~1u) != H) quit(3, "display size changed");
       lostTries = 0; continue;

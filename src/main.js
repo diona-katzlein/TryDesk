@@ -518,6 +518,8 @@ app.whenReady().then(async () => {
   let _hosting = false;
   ipcMain.on("hosting-state", (_e, on) => {
     _hosting = !!on; _trayHosting = _hosting; refreshTray();
+    if (_serviceHost) writeServiceSession(_hosting);
+    _hostingNow = _hosting;
     if (!_hosting && _adminWindow) { _adminWindow = false; try { mainWindow.webContents.send("host-admin-window", false); } catch {} }
   });
   // An admin window in front (Task Manager, admin CMD) blocks a non-elevated host's input and hides its cursor.
@@ -613,7 +615,7 @@ app.whenReady().then(async () => {
   // Discord Rich Presence, "Using TryDesk" on the user's profile (best-effort, silent if unavailable).
   if (!_serviceHost) { try { discordRPC.init(logInfo); } catch (e) { logInfo("discord RPC init skipped: " + e.message); } }
   // The renderer reports session state ("idle" | "hosting" | "viewing") so the presence reflects what's happening.
-  ipcMain.on("discord-activity", (_e, state) => { try { discordRPC.setActivity(String(state || "idle")); } catch {} });
+  ipcMain.on("discord-activity", (_e, state) => { _activity = String(state || "idle"); try { discordRPC.setActivity(_activity); } catch {} });
   ipcMain.on("set-ui-language", (_e, l) => { _uiLang = l === "en" ? "en" : "id"; try { discordRPC.setLanguage(_uiLang); } catch {} refreshTray(); setMacMenu(_kbWantCapture); });
 });
 app.on("window-all-closed", () => app.quit());
@@ -928,6 +930,41 @@ ipcMain.on("service-id", (_e, id) => {
   try { fs.writeFileSync(_serviceIdFile, String(id || "").replace(/\D/g, "").slice(0, 12)); } catch {}
 });
 
+// One TryDesk window during a session (owner's report 7 Nov: the app's Home on the left and the service's "This PC is
+// being controlled" on the right). While the PC has the service, a session is hosted by the service's window (SYSTEM),
+// so the user's own app steps aside: its window goes to the tray for the session and comes back after it, the way it
+// was. The service's host says when it hosts in a file users can read; the app watches it.
+const _serviceSessionFile = path.join(_serviceDir, "service-session.json");
+function writeServiceSession(on) {
+  try { fs.writeFileSync(_serviceSessionFile, JSON.stringify({ hosting: !!on, pid: process.pid, at: Date.now() })); } catch {}
+}
+if (_serviceHost) writeServiceSession(false);   // a host that died mid-session left "hosting": not any more
+let _activity = "idle";          // this app's own state (from the page): idle | hosting | viewing
+let _svcHidWindow = false;       // the window was put away here for a service session (and only then comes back)
+function serviceSessionChanged() {
+  if (_serviceHost || process.platform !== "win32" || !mainWindow || mainWindow.isDestroyed()) return;
+  let j = null; try { j = JSON.parse(fs.readFileSync(_serviceSessionFile, "utf8")); } catch {}
+  // A host process that is gone can't be hosting (a SYSTEM process can't be opened from here: EPERM = it runs).
+  let alive = false; if (j && j.hosting && Number.isInteger(j.pid)) { try { process.kill(j.pid, 0); alive = true; } catch (e) { alive = e.code === "EPERM"; } }
+  const on = !!(j && j.hosting && alive);
+  _trayHosting = on || _activity === "hosting"; refreshTray();
+  if (on) {
+    // Not while this app controls another PC itself, and nothing to do when the window is already hidden.
+    if (_svcHidWindow || _activity === "viewing" || !mainWindow.isVisible()) return;
+    _svcHidWindow = true; mainWindow.hide(); logInfo("service session: window to the tray");
+  } else if (_svcHidWindow) {
+    _svcHidWindow = false;
+    try { mainWindow.showInactive(); } catch {}   // back as it was, without taking the focus
+    logInfo("service session over: window back");
+  }
+}
+if (!_serviceHost && process.platform === "win32") {
+  app.whenReady().then(() => {
+    fs.watchFile(_serviceSessionFile, { interval: 1000 }, serviceSessionChanged);
+    app.on("will-quit", () => fs.unwatchFile(_serviceSessionFile));
+  });
+}
+
 // ─── Settings that act on the OS (Settings panel) ───
 // Start with Windows: launched with --tray so it comes up in the system tray, not as a window. An entry made by
 // an older build (no --tray) still counts as "on" and is replaced when the switch is next changed.
@@ -1131,7 +1168,10 @@ ipcMain.handle("fast-capture-start", (e, opts) => {
   stopFast();
   const d = screen.getAllDisplays().find((x) => String(x.id) === String(opts && opts.displayId)) || screen.getPrimaryDisplay();
   // DXGI works in physical pixels; Electron's display bounds are DIP.
-  const r = process.platform === "win32" ? screen.dipToScreenRect(null, d.bounds) : d.bounds;
+  let r = process.platform === "win32" ? screen.dipToScreenRect(null, d.bounds) : d.bounds;
+  // Development builds only: a screen the helper can't find, so it exits at once ("monitor not found"), as it does on a
+  // PC where it can't capture (tests the fallback's failure handling).
+  if (!app.isPackaged && process.env.TRYDESK_TEST_HELPER_FAIL === "1") r = { x: -99999, y: -99999, width: 10, height: 10 };
   const fps = Math.max(1, Math.min(240, Math.round(Number(opts && opts.fps) || 60)));
   const mbps = Math.max(1, Math.min(1000, Math.round(Number(opts && opts.mbps) || 50)));
   const udp = udpKeyOk(opts && opts.udp) ? opts.udp : null;   // session key for the UDP link, handed to the helper on stdin (never on the command line)
@@ -1231,9 +1271,70 @@ ipcMain.on("maximize-window", () => {
 });
 ipcMain.on("close-window", () => { _quitting = true; mainWindow?.close(); });
 
+// ─── Secure desktop (UAC prompt, lock screen), service host only ───
+// The UAC prompt is drawn on Windows' secure desktop ("Winlogon"), which no program in the user's session can see or
+// click, administrator or not: only SYSTEM. So a viewer saw a frozen picture and couldn't answer the prompt (owner's
+// report 7 Nov). The service's host IS SYSTEM: while that desktop has the input, the picture and the input go through
+// the capture helper, which moves to that desktop (trydesk-capture.cpp, followInputDesktop). This process can't move
+// (a thread with windows can't change desktop), so it only watches which desktop is shown.
+let _secureDesk = false, _deskApi = null;
+function inputDesktopName() {
+  try {
+    if (!_deskApi) {
+      const u = require("koffi").load("user32.dll");
+      _deskApi = { open: u.func("void * __stdcall OpenInputDesktop(uint32 flags, int inherit, uint32 access)"),
+        info: u.func("int __stdcall GetUserObjectInformationW(void *h, int index, void *buf, uint32 len, _Out_ uint32 *needed)"),
+        close: u.func("int __stdcall CloseDesktop(void *h)") };
+    }
+    const h = _deskApi.open(0, 0, 0x0001);   // DESKTOP_READOBJECTS
+    if (!h) return "";   // a desktop this process may not open: for SYSTEM only none, i.e. no input desktop right now
+    const buf = Buffer.alloc(128), need = [0];
+    _deskApi.info(h, 2, buf, buf.length, need);   // UOI_NAME
+    _deskApi.close(h);
+    return buf.toString("utf16le").split("\0")[0];
+  } catch { return ""; }
+}
+if (_serviceHost && process.platform === "win32") {
+  setInterval(() => {
+    if (!_hostingNow || !mainWindow || mainWindow.isDestroyed()) { if (_secureDesk) { _secureDesk = false; } return; }
+    const name = inputDesktopName();
+    const secure = !!name && name.toLowerCase() !== "default";
+    if (secure === _secureDesk) return;
+    _secureDesk = secure;
+    logInfo(`service host: input desktop ${name || "?"}${secure ? " (secure: picture and input through the helper)" : ""}`);
+    try { mainWindow.webContents.send("secure-desktop", secure); } catch {}
+  }, 300);
+}
+let _hostingNow = false;   // mirrors "hosting-state" for the watcher above
+// Input meant for the secure desktop goes to the helper. Coordinates resolved here exactly as for the normal path.
+function helperInput(event, physPoint) {
+  const p = _fast && _fast.proc; if (!p) return false;
+  let m = null;
+  switch (event.action) {
+    case "mousemove": if (physPoint) m = { t: "move", x: Math.round(physPoint.x), y: Math.round(physPoint.y) }; break;
+    case "mousedown": case "mouseup": m = { t: event.action === "mousedown" ? "down" : "up", b: ["left", "right", "middle"].includes(event.button) ? event.button : "left" }; break;
+    case "scroll": m = { t: "wheel", wy: Math.round(-(Number(event.deltaY) || 0) * 120), wx: Math.round((Number(event.deltaX) || 0) * 120) }; break;
+    case "keydown": case "keyup": { const vk = Number(event.vk); if (Number.isInteger(vk) && vk > 0 && vk <= 0xFE) m = { t: "key", vk, up: event.action === "keyup" ? 1 : 0 }; break; }
+  }
+  if (!m) return true;   // nothing the secure desktop takes (relative game moves, typed text): dropped
+  try { p.stdin.write(JSON.stringify({ cmd: "in", ...m }) + "\n"); } catch {}
+  return true;
+}
+
 ipcMain.on("execute-input", (_e, event) => {
   if (!inputReady || !event) return;
   try {
+    if (_secureDesk) {
+      let pt = null;
+      if (event.action === "mousemove") {
+        let d = captureDisplay;
+        if (!d) { const p = screen.getPrimaryDisplay(); d = { boundsX: 0, boundsY: 0, width: p.size.width, height: p.size.height, scaleFactor: p.scaleFactor }; }
+        const nx = Math.min(Math.max(Number(event.x) || 0, 0), 0.9999), ny = Math.min(Math.max(Number(event.y) || 0, 0), 0.9999);
+        const dip = { x: d.boundsX + nx * d.width, y: d.boundsY + ny * d.height };
+        pt = screen.dipToScreenPoint ? screen.dipToScreenPoint(dip) : { x: dip.x * d.scaleFactor, y: dip.y * d.scaleFactor };
+      }
+      if (helperInput(event, pt)) return;
+    }
     switch (event.action) {
       case "mousemove": {
         // Viewer sends coordinates normalized to 0..1 of the captured monitor

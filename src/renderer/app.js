@@ -584,6 +584,8 @@ const TEXT_EN = {
   "Perangkat ini adalah TryDesk untuk HP (hanya mengontrol PC) dan tidak bisa dikontrol": "That device runs TryDesk for phones (it only controls PCs) and can't be controlled",
   "Terlalu banyak percobaan, coba lagi nanti": "Too many attempts, try again later", "Waktu verifikasi habis": "Verification timed out",
   "Password salah": "Wrong password", "Remote gagal membagikan layar": "The remote failed to share its screen",
+  "PC tujuan tidak bisa membagikan layar karena TryDesk di sana berjalan sebagai administrator": "The remote PC can't share its screen because TryDesk there runs as administrator",
+  "Layar PC ini tidak bisa diambil saat TryDesk berjalan sebagai administrator. Buka TryDesk biasa, atau pasang layanan TryDesk (Pengaturan → Keamanan) agar jendela admin tetap bisa dikontrol.": "This PC's screen can't be captured while TryDesk runs as administrator. Open TryDesk normally, or install the TryDesk service (Settings → Security) so admin windows can still be controlled.",
   "Koneksi gagal, relay TURN tidak terjangkau": "Connection failed, TURN relay unreachable",
   "Koneksi P2P gagal, server belum menyediakan TURN relay": "P2P connection failed, the server has no TURN relay yet",
   "Koneksi terputus": "Connection lost", "ID tidak ditemukan atau sedang offline": "ID not found or offline",
@@ -2218,6 +2220,16 @@ async function finishAccept(fromId, viaPassword, fromName = "") {
         if (r.ok) await new Promise((res) => setTimeout(res, 3000));
       } catch {}
     }
+    // Run as administrator, Chromium's capture can't start (see nativeCaptureStream): the helper goes first there. The
+    // service's host (SYSTEM) also counts as elevated, but its Chromium capture works and keeps the fast path.
+    const adminHost = !(config && config.serviceHost) && (await window.electronAPI.isElevated().catch(() => false));
+    if (adminHost) {
+      sess.monitors = await window.electronAPI.getMonitors();
+      sess.currentMonitor = Math.max(0, sess.monitors.findIndex((m) => m.primary));
+      const m = sess.monitors[sess.currentMonitor] || sess.monitors[0];
+      try { cap = { stream: await nativeCaptureStream(m), m }; sess.nativeFallback = true; sessLog(sess, "running as administrator: native capture helper"); }
+      catch (e) { lastErr = e; sessLog(sess, "running as administrator, native capture failed: " + (e && e.message) + ", trying Chromium's capture"); }
+    }
     // Two tries here (each can take ~6 s), then the helper below, which retries the screen on its own.
     for (let i = 0; i < 2 && !cap && host === sess; i++) {
       if (i) await new Promise((r) => setTimeout(r, 1500));
@@ -2228,10 +2240,11 @@ async function finishAccept(fromId, viaPassword, fromName = "") {
       } catch (e) { lastErr = e; sessLog(sess, `capture try ${i + 1} failed: ${e && e.message}`); }
     }
     // Chromium's capture never came up: take the picture from the DXGI helper instead (see nativeCaptureStream).
-    if (!cap && host === sess) {
+    if (!cap && host === sess && !adminHost) {
       try {
         const m = sess.monitors[sess.currentMonitor] || sess.monitors[0];
         cap = { stream: await nativeCaptureStream(m), m };
+        sess.nativeFallback = true;
         sessLog(sess, "Chromium capture failed, using the native capture helper");
       } catch (e) { sessLog(sess, "native capture fallback failed: " + (e && e.message)); }
     }
@@ -2248,7 +2261,11 @@ async function finishAccept(fromId, viaPassword, fromName = "") {
     if (!_adminTipShown) { _adminTipShown = true; try { window.electronAPI.isElevated().then((el) => { if (!el) showToast("Tip: agar jendela admin bisa dikontrol, jalankan TryDesk sebagai administrator (Pengaturan → Keamanan)"); }).catch(() => {}); } catch {} }
   } catch (err) {
     console.error(err);
-    sendSignal({ type: "connection-rejected", targetId: fromId, reason: "Remote gagal membagikan layar" });
+    sessLog(sess, "no screen capture: " + (err && err.message));
+    const admin = !(config && config.serviceHost) && (await window.electronAPI.isElevated().catch(() => false));
+    // Said on this PC too: the person here can fix it (start TryDesk without "Run as administrator").
+    if (admin) showToast(HOST_ADMIN_NO_CAPTURE_HERE);
+    sendSignal({ type: "connection-rejected", targetId: fromId, reason: admin ? HOST_ADMIN_NO_CAPTURE : "Remote gagal membagikan layar" });
     closeSession(sess, false); return;
   }
 
@@ -2520,7 +2537,20 @@ const fastCtrl = (sess, msg) => { try { if (sess.dataChannel && sess.dataChannel
 // try with "Could not start video source" while its capture process crashed (rented PC, 2026-11-02), the picture
 // comes from TryDesk's DXGI helper instead: its H.264 is decoded here and handed to WebRTC as an ordinary video
 // track, so every viewer (phone, Mac, old versions) still gets it. The fast path stays off while this runs.
+// TryDesk run as administrator ("Jalankan sebagai administrator") is the common case: there Chromium's capture never
+// starts at all (DXGI and Windows Graphics Capture both refuse an elevated process, measured 7 Nov on Electron 45.2.1:
+// "Could not start video source" in every variant), so this helper is the only picture. It used to count as started
+// as soon as the process was spawned: a helper that could not capture on that PC (no H.264 encoder on the GPU, the
+// screen not found) exited, was restarted every 1.5 s for ever, and the viewer sat on "loading" until it gave up.
+// Now the picture must really arrive, and a helper that keeps failing ends the session with a reason.
 let nativeCap = null;
+let _helperExitWhy = "";   // the helper's last {"exit":N,"why":"..."} line
+window.electronAPI?.onFastCaptureInfo?.((s) => { try { const j = JSON.parse(s); if (j && j.exit != null) _helperExitWhy = String(j.why || "").slice(0, 80); } catch {} });
+const NATIVE_FATAL = new Set([2, 4, 5]);   // screen not found, no H.264 encoder, D3D / Media Foundation setup: a retry can't help
+const NATIVE_FIRST_FRAME_MS = 8000;
+// To the viewer (a peer text: it must be in TEXT_EN to be shown, see knownPeerText) and to the person at this PC.
+const HOST_ADMIN_NO_CAPTURE = "PC tujuan tidak bisa membagikan layar karena TryDesk di sana berjalan sebagai administrator";
+const HOST_ADMIN_NO_CAPTURE_HERE = "Layar PC ini tidak bisa diambil saat TryDesk berjalan sebagai administrator. Buka TryDesk biasa, atau pasang layanan TryDesk (Pengaturan → Keamanan) agar jendela admin tetap bisa dikontrol.";
 async function nativeCaptureStream(m) {
   if (!(await fastHostAvailable()) || typeof MediaStreamTrackGenerator === "undefined") throw new Error("native capture unavailable");
   stopNativeCapture();
@@ -2529,13 +2559,32 @@ async function nativeCaptureStream(m) {
   let pending = 0, codec = "";
   const dec = new VideoDecoder({
     // A frame the track can't take yet is dropped, not queued: the newest picture is what matters.
-    output: (frame) => { if (pending > 2) { frame.close(); return; } pending++; writer.write(frame).catch(() => {}).finally(() => { pending--; }); },
+    // A decoded picture is what counts as "started" (a packet the decoder can't take would still leave the viewer blank).
+    output: (frame) => { if (!cap.gotFrame) { cap.gotFrame = true; firstFrame(true); } if (pending > 2) { frame.close(); return; } pending++; writer.write(frame).catch(() => {}).finally(() => { pending--; }); },
     error: (e) => capLog("native capture decode: " + e.message),
   });
   const rate = { fps: Math.min(rdpFpsCap(), hostQuality.fps || 60), mbps: 40 };
+  let firstFrame = () => {};
+  const started = new Promise((res) => { firstFrame = res; });
+  _helperExitWhy = "";
   const cap = nativeCap = {
-    m, gen, dec,
+    m, gen, dec, gotFrame: false, fails: 0, failed: "",
+    // The helper exited. Before its first frame: a code that can't change by retrying, or 3 tries, fails the start.
+    // After: restarts (a display change ends it on purpose, exit 3) until 5 in a row bring no frame.
+    ended(code) {
+      if (nativeCap !== cap) return;
+      cap.fails++;
+      capLog(`native capture helper exited (${code}${_helperExitWhy ? ": " + _helperExitWhy : ""})`);
+      if (cap.gotFrame ? cap.fails >= 5 : (NATIVE_FATAL.has(code) || cap.fails >= 3)) {
+        cap.failed = `helper ${code}${_helperExitWhy ? " (" + _helperExitWhy + ")" : ""}`;
+        firstFrame(false);
+        if (cap.gotFrame) nativeCaptureFailed(cap);
+        return;
+      }
+      setTimeout(() => cap.restart(), 1500);
+    },
     packet(p) {
+      cap.fails = 0;
       if (p.key) {
         const c = fastCodecFromSps(p.data) || "avc1.640034";
         if (c !== codec) { codec = c; try { dec.configure({ codec, optimizeForLatency: true }); } catch (e) { capLog("native capture config: " + e.message); } }
@@ -2550,14 +2599,33 @@ async function nativeCaptureStream(m) {
       const r = await window.electronAPI.fastCaptureStart({ displayId: m && m.displayId, ...rate }).catch(() => ({ ok: false }));
       if (nativeCap !== cap) return;
       if (r && r.ok) { codec = ""; window.electronAPI.fastCaptureCmd({ cmd: "key" }); capLog("native capture restarted"); }
-      else setTimeout(() => cap.restart(), 3000);
+      else cap.ended(-1);
     },
   };
   const r = await window.electronAPI.fastCaptureStart({ displayId: m && m.displayId, ...rate }).catch(() => ({ ok: false }));
   if (!r || !r.ok) { stopNativeCapture(); throw new Error("native capture helper did not start"); }
   window.electronAPI.fastCaptureCmd({ cmd: "key" });
   capLog(`native capture started (${rate.fps} fps)`);
+  const ok = await Promise.race([started, new Promise((res) => setTimeout(() => res(false), NATIVE_FIRST_FRAME_MS))]);
+  if (!ok || nativeCap !== cap) {
+    const why = cap.failed || (nativeCap !== cap ? "stopped" : `no picture within ${NATIVE_FIRST_FRAME_MS / 1000} s`);
+    if (nativeCap === cap) stopNativeCapture();
+    throw new Error("native capture failed: " + why);
+  }
+  capLog("native capture: first frame");
   return new MediaStream([gen]);
+}
+// The helper stopped for good during a session: end it with the reason instead of a frozen picture.
+function nativeCaptureFailed(cap) {
+  const sess = host;
+  capLog("native capture gave up: " + cap.failed);
+  stopNativeCapture();
+  if (!sess || sess.role !== "host") return;
+  sessLog(sess, "native capture gave up: " + cap.failed);
+  // The service's host only uses the helper for the secure desktop: there the plain reason fits.
+  const svc = !!(config && config.serviceHost);
+  closeSession(sess, true, svc ? "Remote gagal membagikan layar" : HOST_ADMIN_NO_CAPTURE);
+  if (!svc) showToast(HOST_ADMIN_NO_CAPTURE_HERE);
 }
 function stopNativeCapture() {
   if (!nativeCap) return;
@@ -2566,6 +2634,20 @@ function stopNativeCapture() {
   try { c.gen.stop(); } catch {}
   try { window.electronAPI.fastCaptureStop(); } catch {}
 }
+
+// Service host: a UAC prompt or the lock screen took the input (main.js watches the desktop). Chromium's capture
+// can't see that desktop; the helper (SYSTEM, follows the input desktop) carries the picture until it is gone, and
+// main.js sends the viewer's input to the helper meanwhile. A fast-path session needs nothing: its helper follows.
+window.electronAPI?.onSecureDesktop?.(async (on) => {
+  const sess = host;
+  if (!sess || sess.role !== "host" || !(config && config.serviceHost)) return;
+  sessLog(sess, on ? "secure desktop (UAC prompt / lock screen) is up" : "secure desktop gone");
+  if (sess.fastActive || sess.nativeFallback) return;
+  if (!!sess.forceNative === on) return;
+  sess.forceNative = on;
+  try { await replaceCaptureTrack(sess, null, false, on ? "secure desktop" : "normal desktop"); }
+  catch (e) { capLog("secure desktop swap failed: " + (e && e.message)); if (on) sess.forceNative = false; }
+});
 
 // Host: one encoded frame from the helper → chunks on the fast channel.
 function hostFastPacket(p) {
@@ -2593,7 +2675,7 @@ function hostFastPacket(p) {
 }
 window.electronAPI?.onFastCapturePacket?.(hostFastPacket);
 window.electronAPI?.onFastCaptureEnded?.((d) => {
-  if (nativeCap) { capLog(`native capture helper exited (${d && d.code})`); const c = nativeCap; setTimeout(() => c.restart(), 1500); return; }
+  if (nativeCap) { nativeCap.ended(d && d.code); return; }
   const sess = host;
   if (!sess || !sess.fastActive) return;
   hostFastStop(sess, `helper exited (${d && d.code})`);
@@ -2961,12 +3043,16 @@ function replaceCaptureTrack(sess, index, onlyIfChanged = false, reason = "") {
 async function swapCaptureTrack(sess, index) {
   const sender = sess.pc && sess.pc.getSenders().find((s) => s.track && s.track.kind === "video");
   if (!sender) return;
-  const { stream, m } = await hostCapture(sess, index, false);
+  // A session on the helper (run as administrator: Chromium's capture can't start) stays on it for another screen or
+  // frame rate. Before, the swap asked Chromium, failed, and the monitor picker silently did nothing.
+  const viaNative = !!sess.forceNative || !!sess.nativeFallback;
+  const { stream, m } = viaNative ? { stream: await nativeCaptureStream(sess.monitors[index] || sess.monitors[0]), m: sess.monitors[index] || sess.monitors[0] }
+    : await hostCapture(sess, index, false);
   const newVideo = stream.getVideoTracks()[0];
   // The session may have closed while this swap waited its turn, release the screen instead of leaking it.
-  if (!sess.pc || sess.pc.connectionState === "closed") { stream.getTracks().forEach((t) => t.stop()); return; }
+  if (!sess.pc || sess.pc.connectionState === "closed") { stream.getTracks().forEach((t) => t.stop()); if (viaNative) stopNativeCapture(); return; }
   await sender.replaceTrack(newVideo);
-  stopNativeCapture();   // Chromium's capture works again: the helper fallback is no longer needed
+  if (!viaNative) stopNativeCapture();   // Chromium's capture works again: the helper fallback is no longer needed
   if (sess.videoTrack) sess.videoTrack.stop();
   sess.videoTrack = newVideo;
   // Keep localStream's video in sync (audio track preserved) so later applyConstraints target the live track
