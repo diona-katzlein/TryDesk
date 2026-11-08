@@ -586,7 +586,8 @@ const TEXT_EN = {
   "Perangkat ini adalah TryDesk untuk HP (hanya mengontrol PC) dan tidak bisa dikontrol": "That device runs TryDesk for phones (it only controls PCs) and can't be controlled",
   "Terlalu banyak percobaan, coba lagi nanti": "Too many attempts, try again later", "Waktu verifikasi habis": "Verification timed out",
   "Password salah": "Wrong password", "Remote gagal membagikan layar": "The remote failed to share its screen",
-  "PC tujuan tidak bisa membagikan layar karena TryDesk di sana berjalan sebagai administrator": "The remote PC can't share its screen because TryDesk there runs as administrator",
+  "Menyimpan ke Unduhan\\TryDesk...": "Saving to Downloads\\TryDesk...", "File tidak bisa disiapkan untuk dikirim": "The file couldn't be prepared for sending",
+  "PC tujuan tidak bisa membagikan layar karena TryDesk di sana berjalan sebagai administrator":"The remote PC can't share its screen because TryDesk there runs as administrator",
   "Layar PC ini tidak bisa diambil saat TryDesk berjalan sebagai administrator. Buka TryDesk biasa, atau pasang layanan TryDesk (Pengaturan → Keamanan) agar jendela admin tetap bisa dikontrol.": "This PC's screen can't be captured while TryDesk runs as administrator. Open TryDesk normally, or install the TryDesk service (Settings → Security) so admin windows can still be controlled.",
   "Koneksi gagal, relay TURN tidak terjangkau": "Connection failed, TURN relay unreachable",
   "Koneksi P2P gagal, server belum menyediakan TURN relay": "P2P connection failed, the server has no TURN relay yet",
@@ -824,9 +825,12 @@ function riseWords(el) {
   setTimeout(() => { el.innerHTML = src; delete el.dataset.rising; }, 460 + i * 115 + 60);
 }
 // A whole screen or page arriving (one beat): the container fades up 8 px, its heading rises.
+// The class comes off when the beat ends: a transform left on a screen (even an identity one) makes it the frame
+// for every position:fixed page inside it, so "Semua perangkat" opened 38 px low after any return to Home.
 function arrive(el, heading) {
   if (!el || motionOff()) return;
   el.classList.remove("td-arrive"); void el.offsetWidth; el.classList.add("td-arrive");
+  el.addEventListener("animationend", function done(e) { if (e.target !== el) return; el.classList.remove("td-arrive"); el.removeEventListener("animationend", done); });
   if (heading) riseWords(heading);
 }
 
@@ -1129,7 +1133,7 @@ function renderRecentStrip(thumbs = getThumbs()) {
 }
 function setDevicesOpen(on) {
   document.documentElement.classList.toggle("devices-open", !!on);
-  if (on) { closeTileMenu(); if (!isPhoneUi()) arrive($(".hcard-sessions"), $(".dev-title")); setTimeout(() => $("#sess-search")?.focus({ preventScroll: true }), 50); }
+  if (on) { closeTileMenu(); $("#screen-home")?.classList.remove("td-arrive"); if (!isPhoneUi()) arrive($(".hcard-sessions"), $(".dev-title")); setTimeout(() => $("#sess-search")?.focus({ preventScroll: true }), 50); }
 }
 
 // ─── Tile menu (⋮, right-click, long-press): AnyDesk's Recent Sessions menu ───
@@ -2216,7 +2220,8 @@ async function finishAccept(fromId, viaPassword, fromName = "") {
     // Service host in a disconnected session (RDP closed): nothing is drawn there; move it to the console first.
     if (config && config.serviceHost) {
       await serviceFollowUserLang();   // a password session skips the Accept dialog: the language comes here then
-      serviceShowWindow();   // "Remote session active" + Disconnect, as the normal app shows it
+      // "Remote session active" + Disconnect: in the user's own TryDesk when it runs (svcPublish below), else here.
+      if (!svcRouted()) serviceShowWindow();
       try {
         const r = await window.electronAPI.serviceAttachConsole();
         sessLog(sess, r.ok ? "session moved to the console" : "session stays: " + r.why);
@@ -2313,6 +2318,7 @@ async function finishAccept(fromId, viaPassword, fromName = "") {
     $("#hosting-peer-label").textContent = nm && nm !== "TryDesk User" ? `Dikontrol oleh ${nm}` : "Dikontrol oleh"; }
   showScreen("hosting");
   startHostingTimer();
+  if (config && config.serviceHost) { svcChat = []; svcPublish({ state: "session", sess: { id: String(sess.peerId), name: stripBidi(String(sess.fromName || "")).trim(), since: Date.now() } }); }
   sendSignal({ type: "connection-accepted", targetId: sess.peerId });
   // If the viewer never sets up the call (it vanished between asking and our accept), don't stay "being
   // controlled", capturing the screen and turning everyone else away as busy. Only for a call that never
@@ -3398,7 +3404,7 @@ function closeSession(sess, notify = true, reason = "") {
     hostCaptureHeight = 0;
     $("#blackscreen-notice")?.classList.add("hidden");
     host = null;
-    if (config && config.serviceHost && !acceptPending) serviceHideWindow();
+    if (config && config.serviceHost && !acceptPending) { serviceHideWindow(); svcChat = []; svcXfer.clear(); svcPublish({ state: "idle" }); }
     showScreen(viewerSessions().length ? "remote" : "home");
     if (viewerSessions().length && active) switchTab(active);
     return;
@@ -3536,6 +3542,90 @@ const serviceHideWindow = () => { try { window.electronAPI.serviceHideWindow(); 
 const serviceShowWindow = () => { try { window.electronAPI.serviceShowWindow(); } catch {} };
 // SYSTEM has no language of its own, so the service's window was always English (owner's picture, 7 Nov): take the
 // language the user picked in their own TryDesk (main.js, export-ui-lang / service-user-lang).
+// ─── One TryDesk with the service, service host side (see main.js "One TryDesk") ───
+// While the user's own TryDesk runs, this window stays hidden: the request, the session, Chat and Disconnect are
+// shown there and answered from there. Without it (quit, after a restart) this window is the fallback, as before.
+let svcFront = false;                       // the user's TryDesk is running
+let svcReqSeq = 0, svcState = { state: "idle" }, svcChat = [], svcChatSeq = 0, svcCmdLast = 0;
+const svcXfer = new Map();                  // file transfers of the service's session, shown in the user's TryDesk
+function svcPublish(next) {
+  if (!(config && config.serviceHost)) return;
+  if (next) svcState = next;
+  try { window.electronAPI.svcUiPublish({ ...svcState, chat: svcChat.slice(-50), xfers: [...svcXfer.values()] }); } catch {}
+}
+let svcPubTimer = null;   // progress: at most ~3 updates a second
+function svcPublishSoon() { if (!svcPubTimer) svcPubTimer = setTimeout(() => { svcPubTimer = null; svcPublish(); }, 300); }
+// The service's transfer card (in its own, usually hidden, window) also reports to the user's TryDesk.
+function svcWrapCard(card, x) {
+  if (!(config && config.serviceHost)) return card;
+  svcXfer.set(x.id, x); svcPublish();
+  const end = () => setTimeout(() => { svcXfer.delete(x.id); svcPublish(); }, 8000);
+  const w = Object.create(card);
+  // The card's own buttons call card.onAccept / onReject: set them there, not on this wrapper (the fallback window's
+  // Accept did nothing before, 8 Nov).
+  for (const k of ["onAccept", "onReject"]) Object.defineProperty(w, k, { get: () => card[k], set: (f) => { card[k] = f; } });
+  return Object.assign(w, {
+    setSub(t) { card.setSub(t); x.sub = String(t); svcPublishSoon(); },
+    progress(d, total) { card.progress(d, total); x.state = "progress"; x.done = d; svcPublishSoon(); },
+    toProgress() { card.toProgress(); x.state = "progress"; svcPublishSoon(); },
+    finish(ok) { card.finish(ok); x.state = ok ? "ok" : "fail"; svcPublish(); end(); },
+    remove() { card.remove(); svcXfer.delete(x.id); svcPublish(); },
+  });
+}
+// A file the viewer offers: the person at this PC answers (in their TryDesk, or this window as the fallback); a yes
+// saves it in their Downloads\TryDesk (no save dialog: that would be SYSTEM's).
+function svcOnOffer(sess, ev) {
+  const ch = sess.fileChannel;
+  const no = (reason) => { try { ch.send(JSON.stringify({ t: "reject", id: ev.id, reason })); } catch {} };
+  if (sess.role !== "host" || forceViewOnly || typeof ev.id !== "string" || _safeSize(ev.size) === null) return no("denied");
+  if (fileBusy(sess) || sess.svcOffer) return no("busy");
+  const name = safeFileName(ev.name);
+  const card = svcWrapCard(createCard(sess, ev.id, { dir: "recv", name, size: ev.size, incoming: true }), { id: ev.id, dir: "recv", name, size: ev.size, state: "offer", done: 0, sub: "" });
+  const offer = sess.svcOffer = { id: ev.id };
+  offer.reject = () => { if (sess.svcOffer !== offer) return; sess.svcOffer = null; no(); card.remove(); };
+  offer.accept = async () => {
+    if (sess.svcOffer !== offer) return; sess.svcOffer = null;
+    if (fileBusy(sess)) { no("busy"); card.remove(); return; }
+    let r = null; try { r = await window.electronAPI.svcInboxOpen(name); } catch (e) { sessLog(sess, "service: can't save the file: " + (e && e.message)); }
+    if (!r || !card.el.isConnected) { no("denied"); card.remove(); return; }
+    sess.activeRecv = { id: ev.id, size: _safeSize(ev.size), received: 0, writeId: r.id, filePath: r.path, canceled: false, card };
+    card.toProgress();
+    ch.send(JSON.stringify({ t: "accept", id: ev.id }));
+  };
+  card.onAccept = offer.accept; card.onReject = offer.reject;
+}
+// The user's TryDesk sends a file: it copied it into the outbox; this host reads only that (main.js checks it).
+async function svcSendFromOutbox(outId) {
+  const sess = host;
+  if (!sess || !sess.fileChannel || sess.fileChannel.readyState !== "open" || fileBusy(sess)) return;
+  let r = null; try { r = await window.electronAPI.svcOutboxOpen(outId); } catch (e) { sessLog(sess, "service: outbox refused: " + (e && e.message)); }
+  if (!r) { try { window.electronAPI.svcOutboxDone(outId); } catch {} return; }
+  await sendOneFile(sess, { name: r.name, size: r.size, readId: r.id });
+  try { window.electronAPI.svcOutboxDone(outId); } catch {}
+}
+const svcRouted = () => !!(config && config.serviceHost && svcFront);
+if (window.electronAPI?.svcFrontendAlive) {
+  setInterval(async () => {
+    if (!(config && config.serviceHost)) return;
+    let alive = false; try { alive = !!(await window.electronAPI.svcFrontendAlive()); } catch {}
+    const was = svcFront; svcFront = alive;
+    // The user's TryDesk went away during a request or a session: this window takes over at once.
+    if (was && !alive && (acceptPending || host)) { serviceShowWindow(); if (acceptPending) { try { window.electronAPI.focusWindow(true); } catch {} } }
+  }, 1500);
+  // first answer before the first request
+  window.electronAPI.svcFrontendAlive().then((a) => { svcFront = !!a; }).catch(() => {});
+}
+window.electronAPI?.onSvcCmd?.((c) => {
+  if (!(config && config.serviceHost) || !c || c.n === svcCmdLast) return;
+  svcCmdLast = c.n;
+  if ((c.cmd === "accept" || c.cmd === "reject") && acceptPending && c.req === svcReqSeq && acceptDlgSettle) acceptDlgSettle(c.cmd === "accept");
+  else if (c.cmd === "disconnect" && host) closeSession(host, true);
+  else if (c.cmd === "chat" && host && c.text && host.dataChannel && host.dataChannel.readyState === "open") {
+    host.dataChannel.send(JSON.stringify({ __ctrl: "chat", text: c.text })); addChatMessage(host, true, c.text);
+  }
+  else if ((c.cmd === "file-accept" || c.cmd === "file-reject") && host && host.svcOffer && host.svcOffer.id === c.text) (c.cmd === "file-accept" ? host.svcOffer.accept : host.svcOffer.reject)();
+  else if (c.cmd === "file-send" && /^[0-9a-f]{16}$/.test(c.text)) svcSendFromOutbox(c.text);
+});
 async function serviceFollowUserLang() {
   if (!(config && config.serviceHost)) return;
   let l = null; try { l = await window.electronAPI.serviceUserLang?.(); } catch {}
@@ -3560,8 +3650,10 @@ function askAccept(fromId, fromName, hint = "") {
   // A dark cover still up from a dropped session would hide this dialog (the covers sit above every window): the
   // person here must see who is asking, so the cover goes first.
   endBlackGrace();
+  // The service's host with the user's TryDesk running: that TryDesk shows and answers this request (svcPublish below).
+  const routed = svcRouted();
   return new Promise((resolve) => {
-    try { window.electronAPI.focusWindow(true); } catch {}   // on top until answered (see main.js)
+    if (!routed) { try { window.electronAPI.focusWindow(true); } catch {} }   // on top until answered (see main.js)
     $("#accept-id").textContent = fromId;
     setAcceptHint(hint);
     const aliasEl = $("#accept-alias");
@@ -3574,7 +3666,8 @@ function askAccept(fromId, fromName, hint = "") {
     // The service's window speaks the language of the user at this PC (picked in their own TryDesk).
     if (config && config.serviceHost) serviceFollowUserLang().then(setAlias);
     // Settings → Umum → Notifikasi: tell the user even when TryDesk is behind other windows.
-    if (!document.hasFocus() && prefGet("notifyIncoming")) {
+    if (routed) { /* the user's TryDesk notifies */ }
+    else if (!document.hasFocus() && prefGet("notifyIncoming")) {
       try { new Notification(tr("Permintaan koneksi masuk"), { body: (alias && alias !== "TryDesk User" ? alias + " · " : "") + fmtId(fromId), silent: !prefGet("notifySound") }); } catch {}
     } else if (prefGet("notifySound")) chime();
     // List only what this remote will REALLY be able to do, from the host's current permissions.
@@ -3591,6 +3684,11 @@ function askAccept(fromId, fromName, hint = "") {
     showCount();
     acceptPending = true;
     acceptFromId = fromId;
+    if (routed) {
+      svcReqSeq++;
+      svcPublish({ state: "request", seq: svcReqSeq, req: { id: String(fromId), name: alias, hint: String(hint || ""), until: Date.now() + ACCEPT_TIMEOUT * 1000,
+        perms: { control: hostControlAllowed(), files: hostFilesAllowed(), clipboard: !!(allowClipboardPref && hostControlAllowed()) } } });
+    }
 
     if (acceptTimerHandle) clearInterval(acceptTimerHandle);
     acceptTimerHandle = setInterval(() => {
@@ -3612,8 +3710,9 @@ function askAccept(fromId, fromName, hint = "") {
       acceptDlgSettle = null;
       if (acceptTimerHandle) { clearInterval(acceptTimerHandle); acceptTimerHandle = null; }
       ov.classList.add("hidden");
-      try { window.electronAPI.focusWindow(false); } catch {}
-      if (config && config.serviceHost && !val) serviceHideWindow();
+      // (focus-window always shows the window: not for a request the user's TryDesk answered, or it popped up here)
+      if (!routed) { try { window.electronAPI.focusWindow(false); } catch {} }
+      if (config && config.serviceHost && !val) { serviceHideWindow(); if (!host) svcPublish({ state: "idle" }); }
       acc.removeEventListener("click", onAcc);
       rej.removeEventListener("click", onRej);
       resolve(val);
@@ -3760,8 +3859,8 @@ function toggleAudio() {
 // ─── Chat (per session: the active viewer tab, or the host session) ───
 // The session the user is looking at: on the "being controlled" screen that is the host session, even when a
 // viewer tab is also open, otherwise chat replies / sent files went to the wrong person.
-function onHostingScreen() { return !!host && !$("#screen-hosting").classList.contains("hidden"); }
-function curChatSess() { return onHostingScreen() ? host : (active || host); }
+function onHostingScreen() { return (!!host || !!svcMirror) && !$("#screen-hosting").classList.contains("hidden"); }
+function curChatSess() { return onHostingScreen() ? (host || svcMirror) : (active || host || svcMirror); }
 function chatOpen() { return !$("#chat-panel").classList.contains("hidden"); }
 function openChat() {
   const sess = curChatSess(); if (!sess) return;
@@ -3814,6 +3913,11 @@ function sendChat() {
   const sess = curChatSess(); if (!sess) return;
   const input = $("#chat-input");
   const text = input.value.trim();
+  if (sess.mirror) {   // the service's session: the service sends it
+    if (!text) return;
+    try { window.electronAPI.svcCmd({ cmd: "chat", text }); } catch {}
+    addChatMessage(sess, true, text); input.value = ""; return;
+  }
   if (!text || !sess.dataChannel || sess.dataChannel.readyState !== "open") return;
   sess.dataChannel.send(JSON.stringify({ __ctrl: "chat", text }));
   addChatMessage(sess, true, text);
@@ -3830,6 +3934,8 @@ function onChatReceived(sess, text) {
   sess.chatTimes.push(now);
   text = text.slice(0, 4000);
   addChatMessage(sess, false, text);
+  // The service's host: the user's own TryDesk shows the chat (svcPublish).
+  if (config && config.serviceHost && sess === host) { svcChat.push({ seq: ++svcChatSeq, text }); if (svcChat.length > 50) svcChat.shift(); svcPublish(); }
   const viewing = sess === curChatSess() && chatOpen();
   if (!viewing) { sess.chatUnread = true; if (sess === curChatSess()) showChatUnread(); renderTabs(); }
   // Notify unless the chat is already open AND the window is focused (user is actively reading).
@@ -4192,6 +4298,7 @@ async function chooseSavePath(name) { return window.electronAPI.fileSaveDialog(n
 
 async function startSendFiles() {
   const sess = curChatSess();
+  if (sess && sess.mirror) return svcMirrorSendFiles();   // the service's session: the service sends it
   if (!sess || !sess.fileChannel || sess.fileChannel.readyState !== "open") return showToast("Belum siap untuk transfer");
   const files = await window.electronAPI.filePick();
   for (const f of files) {
@@ -4205,7 +4312,7 @@ function sendOneFile(sess, file) {
     const ch = sess.fileChannel;
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     sess.activeSend = { id, canceled: false, resolve };
-    const card = createCard(sess, id, { dir: "send", name: file.name, size: file.size });
+    const card = svcWrapCard(createCard(sess, id, { dir: "send", name: file.name, size: file.size }), { id, dir: "send", name: file.name, size: file.size, state: "wait", done: 0, sub: "" });
     card.setSub("Menunggu persetujuan...");
     sess.acceptResolver = null;
     ch.send(JSON.stringify({ t: "offer", id, name: file.name, size: file.size }));
@@ -4221,7 +4328,7 @@ function sendOneFile(sess, file) {
 
     let readId;
     try {
-      readId = await window.electronAPI.fileOpenRead(file.path);
+      readId = file.readId || await window.electronAPI.fileOpenRead(file.path);   // (the service: opened by svc-outbox-open)
       let sent = 0;
       const pace = filePacer(ch);
       while (true) {
@@ -4253,6 +4360,7 @@ function sendOneFile(sess, file) {
 
 async function onFileControl(sess, ev) {
   const ch = sess.fileChannel;
+  if (ev.t === "offer" && config && config.serviceHost) return svcOnOffer(sess, ev);   // the service's own path (Downloads\TryDesk)
   if (ev.t === "offer") {
     if (fileBusy(sess) || (sess.role === "host" && !hostFilesAllowed())) { ch.send(JSON.stringify({ t: "reject", id: ev.id, reason: fileBusy(sess) ? "busy" : "denied" })); return; }
     // The phone app has no file storage yet: say so on both sides instead of a silent "Ditolak".
@@ -5655,7 +5763,123 @@ $("#view-grid").addEventListener("click", () => { recentView = "grid"; store.set
 $("#view-list").addEventListener("click", () => { recentView = "list"; store.set("recentView", "list"); applyRecentView(); });
 $("#btn-cancel-connect").addEventListener("click", () => { if (active) { stopReconnect(active.peerId); closeSession(active, false); } });
 $("#btn-disconnect").addEventListener("click", () => { if (active) closeSession(active, true); });
-$("#btn-stop-hosting").addEventListener("click", () => { if (host) closeSession(host, true); });
+$("#btn-stop-hosting").addEventListener("click", () => { if (host) closeSession(host, true); else if (svcMirror) { try { window.electronAPI.svcCmd({ cmd: "disconnect" }); } catch {} } });
+
+// ─── One TryDesk with the service, the user's app side (see main.js "One TryDesk") ───
+// The service's request and session are shown here, in this TryDesk, with the same dialog and screen as a session of
+// its own: Accept / Reject, "this desktop is being controlled", the timer, Chat, Disconnect. The answers go back to
+// the service. A session of this app itself (none while the service runs) is never touched.
+let svcMirror = null;            // the service's session shown here: { peerId, fromName, chatLog, mirror: true, role: "host" }
+let svcMirrorReq = 0, svcMirrorChatSeen = 0, svcMirrorReqEnd = null;
+function svcMirrorEndRequest() { if (svcMirrorReqEnd) { const f = svcMirrorReqEnd; svcMirrorReqEnd = null; f(); } }
+function svcMirrorShowRequest(seq, r) {
+  svcMirrorEndRequest();
+  svcMirrorReq = seq;
+  const alias = stripBidi(String(r.name || "")).trim(), named = alias && alias !== "TryDesk User";
+  $("#accept-id").textContent = String(r.id || "");
+  $("#accept-alias").textContent = lang === "en" ? `${named ? alias : "Someone"} wants to control this desktop.` : `${named ? alias : "Seseorang"} ingin mengontrol desktop ini.`;
+  setAcceptHint(r.hint || "");
+  const p = r.perms || {};
+  $("#accept-perm-control").classList.toggle("hidden", !p.control);
+  $("#accept-perm-files").classList.toggle("hidden", !p.files);
+  $("#accept-perm-clipboard").classList.toggle("hidden", !p.clipboard);
+  const ov = $("#overlay-accept"), bar = $("#accept-timer-bar"), countEl = $("#accept-countdown");
+  const until = Number(r.until) || Date.now() + ACCEPT_TIMEOUT * 1000;
+  const tick = () => {
+    const left = Math.max(0, Math.round((until - Date.now()) / 1000));
+    bar.style.width = `${(left / ACCEPT_TIMEOUT) * 100}%`;
+    if (countEl) countEl.textContent = `Ditolak otomatis dalam ${left} detik`;
+    if (left <= 0) svcMirrorEndRequest();   // the service times it out too
+  };
+  tick(); const timer = setInterval(tick, 1000);
+  ov.classList.remove("hidden");
+  try { window.electronAPI.focusWindow(true); } catch {}   // on top until answered, as for a request of its own
+  if (!document.hasFocus() && prefGet("notifyIncoming")) {
+    try { new Notification(tr("Permintaan koneksi masuk"), { body: (named ? alias + " · " : "") + fmtId(String(r.id || "")), silent: !prefGet("notifySound") }); } catch {}
+  } else if (prefGet("notifySound")) chime();
+  const acc = $("#btn-accept"), rej = $("#btn-reject");
+  const answer = (cmd) => () => { try { window.electronAPI.svcCmd({ cmd, req: seq }); } catch {} svcMirrorEndRequest(); };
+  const onAcc = answer("accept"), onRej = answer("reject");
+  acc.addEventListener("click", onAcc); rej.addEventListener("click", onRej);
+  svcMirrorReqEnd = () => {
+    clearInterval(timer); ov.classList.add("hidden");
+    acc.removeEventListener("click", onAcc); rej.removeEventListener("click", onRej);
+    try { window.electronAPI.focusWindow(false); } catch {}
+  };
+}
+function svcMirrorShowSession(s, chat) {
+  const id = String(s.id || "");
+  if (!svcMirror || svcMirror.peerId !== id) {
+    svcMirror = { peerId: id, fromName: String(s.name || ""), chatLog: [], chatUnread: false, mirror: true, role: "host", sid: "svc" };
+    svcMirrorChatSeen = 0;
+    $("#hosting-text").textContent = "Anda tetap bisa memakai PC ini. Putuskan kapan saja.";
+    $("#hosting-peer-id").textContent = fmtId(id);
+    { const nm = stripBidi(svcMirror.fromName).trim(); $("#hosting-peer-label").textContent = nm && nm !== "TryDesk User" ? `Dikontrol oleh ${nm}` : "Dikontrol oleh"; }
+    document.documentElement.classList.add("svc-mirror");
+    startHostingTimer(); hostingStartTime = Number(s.since) || Date.now();
+    if (!viewerSessions().some((x) => x.pc)) showScreen("hosting");   // not over this app's own remote view
+  }
+  for (const m of chat || []) if (m && m.seq > svcMirrorChatSeen) { svcMirrorChatSeen = m.seq; onChatReceived(svcMirror, String(m.text || "")); }
+}
+// Transfers of the service's session, drawn with the same cards as a session of this app.
+const svcMirrorCards = new Map();   // id -> { card, state }
+function svcMirrorXfers(list) {
+  const seen = new Set();
+  for (const x of Array.isArray(list) ? list : []) {
+    if (!x || typeof x.id !== "string") continue;
+    seen.add(x.id);
+    let m = svcMirrorCards.get(x.id);
+    if (!m) {
+      const incoming = x.dir === "recv" && x.state === "offer";
+      const card = createCard(svcMirror || { sid: "svc" }, x.id, { dir: x.dir === "send" ? "send" : "recv", name: String(x.name || "file"), size: Number(x.size) || 0, incoming });
+      if (incoming) {
+        card.onAccept = () => { try { window.electronAPI.svcCmd({ cmd: "file-accept", text: x.id }); } catch {} card.toProgress(); card.setSub("Menyimpan ke Unduhan\\TryDesk..."); };
+        card.onReject = () => { try { window.electronAPI.svcCmd({ cmd: "file-reject", text: x.id }); } catch {} card.remove(); };
+      }
+      m = { card, state: "" }; svcMirrorCards.set(x.id, m);
+    }
+    if (x.state === "progress") m.card.progress(Number(x.done) || 0, Number(x.size) || 0);
+    else if (x.sub && x.state !== "ok" && x.state !== "fail") m.card.setSub(String(x.sub));
+    if ((x.state === "ok" || x.state === "fail") && m.state !== x.state) { if (x.sub) m.card.setSub(String(x.sub)); m.card.finish(x.state === "ok"); }
+    m.state = x.state;
+  }
+  // gone from the service's list: finished cards remove themselves; an unanswered offer that vanished goes now
+  for (const [id, m] of svcMirrorCards) if (!seen.has(id)) { if (m.state !== "ok" && m.state !== "fail") m.card.remove(); svcMirrorCards.delete(id); }
+}
+// Send from this TryDesk during the service's session: the picked files go to the outbox one by one.
+async function svcMirrorSendFiles() {
+  const files = await window.electronAPI.filePick();
+  for (const f of files) {
+    let r = null; try { r = await window.electronAPI.svcOutboxPut(f.path); } catch {}
+    if (!r) { showToast("File tidak bisa disiapkan untuk dikirim"); continue; }
+    try { window.electronAPI.svcCmd({ cmd: "file-send", text: r.id }); } catch {}
+    // one at a time, as in a session of this app: wait until the service reports this file finished
+    const t0 = Date.now();
+    while (svcMirror && Date.now() - t0 < 3600e3) {
+      await sleep(500);
+      const done = [...svcMirrorCards.values()].some((m) => m.card.el.querySelector(".tc-name")?.textContent === r.name && (m.state === "ok" || m.state === "fail"));
+      if (done || (Date.now() - t0 > 15000 && ![...svcMirrorCards.values()].some((m) => m.card.el.querySelector(".tc-name")?.textContent === r.name))) break;
+    }
+  }
+}
+function svcMirrorEnd() {
+  svcMirrorEndRequest();
+  svcMirrorXfers([]);
+  if (!svcMirror) return;
+  const m = svcMirror; svcMirror = null;
+  document.documentElement.classList.remove("svc-mirror");
+  if (!host) stopHostingTimer();
+  if (chatOpen() && !host && !active) closeChat();   // it was this session's chat
+  if (!host && !$("#screen-hosting").classList.contains("hidden")) showScreen("home");
+}
+function onSvcUi(ui) {
+  if (!ui || window.TD_MOBILE || (config && config.serviceHost)) return;
+  if (ui.state === "request" && ui.req && ui.seq) {
+    if (Number(ui.req.until) > Date.now() && ui.seq !== svcMirrorReq) svcMirrorShowRequest(ui.seq, ui.req);
+  } else if (ui.state === "session" && ui.sess) { svcMirrorEndRequest(); svcMirrorShowSession(ui.sess, ui.chat); svcMirrorXfers(ui.xfers); }
+  else svcMirrorEnd();
+}
+window.electronAPI?.onSvcUi?.(onSvcUi);
 
 // Grip bar buttons (mini titlebar during remote)
 $("#grip-minimize").addEventListener("click", () => window.electronAPI.minimizeWindow());
@@ -6613,7 +6837,10 @@ $("#update-dismiss").addEventListener("click", () => { if (updateInfo) store.set
     };
     await adopt();
     const t = setInterval(() => { if (store.get("svcAdopted") === "1") clearInterval(t); else adopt(); }, 10000);
-  } else await refreshServiceState();
+  } else {
+    await refreshServiceState();
+    try { onSvcUi(await window.electronAPI.svcUiNow?.()); } catch {}   // a service session already running at start
+  }
   checkUpdate(); setInterval(checkUpdate, 6 * 3600 * 1000);   // at start, then every 6 hours
   syncDefaultQualityUI();
   // A pre-1.0 unsalted hash can't do the challenge, so it silently meant "always ask Accept", drop it and say so.

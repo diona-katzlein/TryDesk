@@ -197,6 +197,8 @@ const _startInTray = process.argv.includes("--tray");
 let tray = null, _trayId = "", _trayHosting = false, _quitting = false;
 function showMainWindow() {
   if (!mainWindow) return;
+  if (serviceToFront()) return;   // the service's session window is the one TryDesk window now
+
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show(); mainWindow.focus();
 }
@@ -376,6 +378,7 @@ function createWindow() {
     _windowReady = true; logInfo("renderer loaded" + (_serviceHost ? " (service host)" : ""));
     if (_serviceHost) return;                             // the service's host never shows a window
     if (_startInTray && tray) return;                     // Windows login start: stay in the tray
+    if (serviceToFront()) return;                         // started during the service's session: one TryDesk window
     try { mainWindow.show(); mainWindow.focus(); } catch {}
   });
   // Alt+F4 / the taskbar's "Close window": same as the X button, hide to the tray, unless really quitting.
@@ -390,8 +393,11 @@ function createWindow() {
   // The service's window is up (a request waiting, or a session): the user's own TryDesk steps aside meanwhile, so
   // only one TryDesk window shows (see serviceSessionChanged).
   if (_serviceHost) {
-    mainWindow.on("show", () => { _svcWinShown = true; writeServiceSession(true); });
-    mainWindow.on("hide", () => { _svcWinShown = false; writeServiceSession(_hostingNow); });
+    mainWindow.on("show", () => { _svcWinShown = true; svcPublish(); });
+    mainWindow.on("hide", () => { _svcWinShown = false; svcPublish(); });
+  } else {
+    // Whatever brings this window up while the service's window is up (a notification, a dialog), it goes back.
+    mainWindow.on("show", () => { if (_svcUp) setImmediate(keepOutForService); });
   }
   // Only swallow keys while focused; on blur, stop swallowing AND release any held keys on the host so a
   // modifier can't get stuck down when the user clicks away mid-combo.
@@ -526,7 +532,7 @@ app.whenReady().then(async () => {
   ipcMain.on("hosting-state", (_e, on) => {
     _hosting = !!on; _trayHosting = _hosting; refreshTray();
     _hostingNow = _hosting;
-    if (_serviceHost) writeServiceSession(_hosting || _svcWinShown);
+    if (_serviceHost) svcPublish();
     if (!_hosting && _adminWindow) { _adminWindow = false; try { mainWindow.webContents.send("host-admin-window", false); } catch {} }
   });
   // An admin window in front (Task Manager, admin CMD) blocks a non-elevated host's input and hides its cursor.
@@ -958,34 +964,145 @@ ipcMain.on("service-id", (_e, id) => {
 // was. The service's host says when it hosts in a file users can read; the app watches it.
 // (8 Nov, owner's report with a picture: the app stayed next to the service's Accept dialog, because only a running
 // session counted. Now "hosting" means the service's window is up for any reason: a request waiting or a session.)
+// (8 Nov, second picture, Windows Sandbox: opening TryDesk again during the service's session, from the desktop
+// shortcut, the exe or the tray, brought the app's window back next to the service's: it was only put away once. Now
+// it is ONE TryDesk for as long as the service's window is up: any attempt to open the app brings the service's window
+// to the front instead, and the app stays in the tray until the service's window is gone.)
 const _serviceSessionFile = path.join(_serviceDir, "service-session.json");
 let _svcWinShown = false;   // service host: its window is on screen
+let _svcPublished = null;   // service host: what the file says now
 function writeServiceSession(on) {
+  _svcPublished = !!on;
   try { fs.writeFileSync(_serviceSessionFile, JSON.stringify({ hosting: !!on, pid: process.pid, at: Date.now() })); } catch {}
 }
-if (_serviceHost) writeServiceSession(false);   // a host that died mid-session left "hosting": not any more
+// Service host: the state is read from the window itself, every second as well as on its show / hide events, so a
+// missed event (restore, minimize) can't leave the file wrong. Only the WINDOW counts: a session the user's own
+// TryDesk shows (window hidden here) must not send that TryDesk to the tray.
+function svcPublish() {
+  if (!_serviceHost) return;
+  // (minimized still counts: isVisible() is false for a minimized window, and the user's TryDesk came back then)
+  const up = !!mainWindow && !mainWindow.isDestroyed() && (mainWindow.isVisible() || mainWindow.isMinimized());
+  if (up !== _svcPublished) writeServiceSession(up);
+}
+if (_serviceHost) {
+  writeServiceSession(false);   // a host that died mid-session left "hosting": not any more
+  app.whenReady().then(() => setInterval(svcPublish, 1000));
+  // The user's app asks to bring this window to the front (TryDesk opened again during the session): it writes a
+  // file in the user's own profile, which only that user (and SYSTEM) can write.
+  const prof = (process.argv.find((a) => a.startsWith("--user-profile=")) || "").slice(15);
+  if (prof) {
+    const req = path.join(prof, "AppData", "Roaming", "TryDesk", "service-front.req");
+    app.whenReady().then(() => fs.watchFile(req, { interval: 700 }, (cur, prev) => {
+      if (!(cur.mtimeMs > prev.mtimeMs) || !_svcPublished || !mainWindow || mainWindow.isDestroyed()) return;
+      try { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.moveTop(); mainWindow.focus(); } catch {}
+      logInfo("service host: brought to the front (TryDesk opened during the session)");
+    }));
+  }
+}
+// ─── One TryDesk: the user's own app shows the service's sessions (owner's decision 8 Nov) ───
+// With the service on, the session is the service's (SYSTEM: it survives restarts, sees UAC prompts), but what the
+// person at the PC sees is their own TryDesk: the request with Accept / Reject, "this desktop is being controlled",
+// Chat and Disconnect. Three small files in the user's own profile (%APPDATA%\TryDesk, readable by that user and
+// SYSTEM only) carry it:
+//   service-frontend.json  app -> service: "I'm running" (pid + time, every 2 s)
+//   service-ui.json        service -> app: idle | request {...} | session {...}, plus the chat
+//   service-cmd.json       app -> service: accept / reject (for that request), disconnect, chat text
+// Without a running app (quit, PC just restarted, login screen) the service's own window is the fallback, as before.
+// Security note (owner told, chose this): Accept in the user's app is as safe as TryDesk without the service; the
+// SYSTEM window's Accept could not be clicked by a program running as the user.
+const SVC_CMDS = new Set(["accept", "reject", "disconnect", "chat", "file-accept", "file-reject", "file-send"]);
+// (the user's real Roaming AppData once known: it can be redirected, see svcOutboxBase below)
+let _svcProfDir = (() => { const a = process.argv.find((x) => x.startsWith("--user-profile=")); return a ? path.join(a.slice(15), "AppData", "Roaming", "TryDesk") : ""; })();
+if (_serviceHost) {
+  ipcMain.handle("svc-frontend-alive", () => {
+    if (!_svcProfDir) return false;
+    try {
+      const j = JSON.parse(fs.readFileSync(path.join(_svcProfDir, "service-frontend.json"), "utf8"));
+      if (!(Date.now() - Number(j.at) < 7000) || !Number.isInteger(j.pid)) return false;
+      try { process.kill(j.pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
+    } catch { return false; }
+  });
+  ipcMain.on("svc-ui-publish", (_e, ui) => {
+    if (!_svcProfDir || !ui || typeof ui !== "object") return;
+    try { fs.writeFileSync(path.join(_svcProfDir, "service-ui.json"), JSON.stringify({ ...ui, pid: process.pid, at: Date.now() })); } catch {}
+  });
+  if (_svcProfDir) app.whenReady().then(() => fs.watchFile(path.join(_svcProfDir, "service-cmd.json"), { interval: 400 }, (cur, prev) => {
+    if (!(cur.mtimeMs > prev.mtimeMs) || !mainWindow || mainWindow.isDestroyed()) return;
+    let c = null; try { c = JSON.parse(fs.readFileSync(path.join(_svcProfDir, "service-cmd.json"), "utf8")); } catch { return; }
+    if (!c || !SVC_CMDS.has(c.cmd)) return;
+    try { mainWindow.webContents.send("svc-cmd", { cmd: c.cmd, n: Number(c.n) || 0, req: Number(c.req) || 0, text: typeof c.text === "string" ? c.text.slice(0, 4000) : "" }); } catch {}
+  }));
+} else if (process.platform === "win32" && _gotLock) {
+  // Only the TryDesk that runs (holds the single-instance lock): a second launch only hands over and quits, and its
+  // quitting deleted the heartbeat, so the service showed its own window (found in Windows Sandbox, 8 Nov).
+  let cmdN = 0;
+  app.whenReady().then(() => {
+    const dir = app.getPath("userData");
+    const beat = () => { try { fs.writeFileSync(path.join(dir, "service-frontend.json"), JSON.stringify({ pid: process.pid, at: Date.now() })); } catch {} };
+    beat(); setInterval(beat, 2000);
+    app.on("will-quit", () => { try { fs.unlinkSync(path.join(dir, "service-frontend.json")); } catch {} });   // gone at once, not after 7 s
+    const uiFile = path.join(dir, "service-ui.json");
+    // A file left by a service host that is gone (crash, uninstall) means nothing: idle.
+    const readUi = () => {
+      let ui = null; try { ui = JSON.parse(fs.readFileSync(uiFile, "utf8")); } catch {}
+      if (!ui || !Number.isInteger(ui.pid)) return { state: "idle" };
+      try { process.kill(ui.pid, 0); } catch (e) { if (e.code !== "EPERM") return { state: "idle" }; }
+      return ui;
+    };
+    // The tray says "this PC is being controlled" during the service's session too.
+    const send = () => {
+      const ui = readUi();
+      const t = ui.state === "session" || _svcUp || _activity === "hosting";
+      if (t !== _trayHosting) { _trayHosting = t; refreshTray(); }
+      try { mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.send("svc-ui", ui); } catch {}
+    };
+    fs.watchFile(uiFile, { interval: 400 }, send);
+    // and every 3 s, so a service host that dies mid-session doesn't leave "being controlled" on screen
+    setInterval(() => { if (fs.existsSync(uiFile)) send(); }, 3000);
+    ipcMain.handle("svc-ui-now", () => readUi());
+  });
+  ipcMain.on("svc-cmd", (_e, c) => {
+    if (!c || !SVC_CMDS.has(c.cmd)) return;
+    const out = { n: ++cmdN + Date.now(), cmd: c.cmd, req: Number(c.req) || 0, text: typeof c.text === "string" ? c.text.slice(0, 4000) : "" };
+    try { fs.writeFileSync(path.join(app.getPath("userData"), "service-cmd.json"), JSON.stringify(out)); } catch {}
+  });
+}
 let _activity = "idle";          // this app's own state (from the page): idle | hosting | viewing
-let _svcHidWindow = false;       // the window was put away here for a service session (and only then comes back)
+let _svcHidWindow = false;       // the window is kept in the tray for the service's session (and comes back after it)
+let _svcUp = false;              // user app: the service's window is up right now
 function serviceSessionChanged() {
   if (_serviceHost || process.platform !== "win32" || !mainWindow || mainWindow.isDestroyed()) return;
   let j = null; try { j = JSON.parse(fs.readFileSync(_serviceSessionFile, "utf8")); } catch {}
   // A host process that is gone can't be hosting (a SYSTEM process can't be opened from here: EPERM = it runs).
   let alive = false; if (j && j.hosting && Number.isInteger(j.pid)) { try { process.kill(j.pid, 0); alive = true; } catch (e) { alive = e.code === "EPERM"; } }
-  const on = !!(j && j.hosting && alive);
-  _trayHosting = on || _activity === "hosting"; refreshTray();
-  if (on) {
-    // Not while this app controls another PC itself, and nothing to do when the window is already hidden.
-    if (_svcHidWindow || _activity === "viewing" || !mainWindow.isVisible()) return;
-    _svcHidWindow = true; mainWindow.hide(); logInfo("service session: window to the tray");
-  } else if (_svcHidWindow) {
+  _svcUp = !!(j && j.hosting && alive);
+  _trayHosting = _svcUp || _activity === "hosting"; refreshTray();
+  if (_svcUp) keepOutForService();
+  else if (_svcHidWindow) {
     _svcHidWindow = false;
     try { mainWindow.showInactive(); } catch {}   // back as it was, without taking the focus
     logInfo("service session over: window back");
   }
 }
-if (!_serviceHost && process.platform === "win32") {
+// While the service's window is up the app's window stays away (not while this app controls another PC itself).
+function keepOutForService() {
+  if (!_svcUp || _activity === "viewing" || !mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) return false;
+  _svcHidWindow = true; mainWindow.hide(); logInfo("service session: window to the tray");
+  return true;
+}
+// TryDesk opened (tray, shortcut, exe) while the service's window is up: that window comes to the front instead.
+function serviceToFront() {
+  if (!_svcUp || _activity === "viewing") return false;
+  _svcHidWindow = true;   // the user wanted TryDesk: it opens once the session is over
+  try { require("koffi").load("user32.dll").func("int __stdcall AllowSetForegroundWindow(uint32 pid)")(0xFFFFFFFF); } catch {}   // ASFW_ANY
+  try { fs.writeFileSync(path.join(app.getPath("userData"), "service-front.req"), String(Date.now())); } catch {}
+  logInfo("service session: TryDesk opened, the service's window comes to the front");
+  return true;
+}
+if (!_serviceHost && process.platform === "win32" && _gotLock) {
   app.whenReady().then(() => {
     fs.watchFile(_serviceSessionFile, { interval: 1000 }, serviceSessionChanged);
+    serviceSessionChanged();   // a session already running when this app starts
     app.on("will-quit", () => fs.unwatchFile(_serviceSessionFile));
   });
 }
@@ -1405,16 +1522,22 @@ const readHandles = new Map();   // id -> { fd, size }
 const writeHandles = new Map();  // id -> { fd }
 let handleSeq = 0;
 
+const _pickedPaths = new Set();   // files the person picked here (only those may go to the service's outbox)
 ipcMain.handle("file-pick", async () => {
+  // Development builds only: a fixed file instead of the Open dialog (end-to-end tests).
+  if (!app.isPackaged && process.env.TRYDESK_TEST_PICK) { const p = process.env.TRYDESK_TEST_PICK; _pickedPaths.add(p); return [{ path: p, name: path.basename(p), size: fs.statSync(p).size }]; }
   const res = await dialog.showOpenDialog(mainWindow, { properties: ["openFile", "multiSelections"] });
   if (res.canceled) return [];
   return res.filePaths.map((p) => {
     const st = fs.statSync(p);
+    _pickedPaths.add(p);
     return { path: p, name: path.basename(p), size: st.size };
   });
 });
 
 ipcMain.handle("file-save-dialog", async (_e, name) => {
+  // Development builds only: save into a fixed folder instead of the Save dialog (end-to-end tests).
+  if (!app.isPackaged && process.env.TRYDESK_TEST_SAVE_DIR) return path.join(process.env.TRYDESK_TEST_SAVE_DIR, path.basename(String(name || "file")));
   const res = await dialog.showSaveDialog(mainWindow, { defaultPath: name });
   return res.canceled ? null : res.filePath;
 });
@@ -1494,9 +1617,122 @@ ipcMain.handle("file-close-write", (e, { id, deleteFile }) => {
   // Mark a successfully received file as coming from the Internet (Zone 3) so Windows SmartScreen and
   // Office Protected View still warn before it is run/opened, a file pushed over TryDesk is untrusted.
   if (h.path && process.platform === "win32") {
-    try { fs.writeFileSync(`${h.path}:Zone.Identifier`, "[ZoneTransfer]\r\nZoneId=3\r\n"); } catch {}
+    const mark = () => fs.writeFileSync(`${h.path}:Zone.Identifier`, "[ZoneTransfer]\r\nZoneId=3\r\n");
+    try { if (_serviceHost) asUser(mark); else mark(); } catch {}   // the service writes it as the user (their file)
   }
 });
+
+// ─── File transfer in the service's sessions (owner's request 8 Nov, see "One TryDesk") ───
+// The person at the PC sends from their own TryDesk and receives into their own Downloads\TryDesk. The service runs
+// as SYSTEM, which can open ANY file, so it never opens a path anyone names:
+//   send:    the user's TryDesk copies a file the person picked into %APPDATA%\TryDesk\svc-outbox\<16 hex>\; the
+//            service opens only that one regular file (no symlink / junction / hard link, inside the user's profile)
+//   receive: the service creates a NEW file (never overwrites) in <profile>\Downloads\TryDesk, the folder checked the
+//            same way, and marks it as from the Internet (Zone.Identifier, see file-close-write)
+// The file manager (browsing this PC's disks) stays off in the service's sessions.
+const OUTBOX_ID = /^[0-9a-f]{16}$/;
+const _svcProfRoot = (() => { const a = process.argv.find((x) => x.startsWith("--user-profile=")); return a ? a.slice(15) : ""; })();
+// Every open below runs AS THE SIGNED-IN USER (Windows impersonation): SYSTEM then gets only what that user could open
+// themselves, whatever links, junctions or hard links lie in the way, and redirected folders (Downloads on D:, OneDrive)
+// work. Handles opened this way keep working after RevertToSelf. A released service that can't impersonate refuses.
+let _w32 = null;
+function w32() {
+  if (_w32) return _w32;
+  const koffi = require("koffi"), k32 = koffi.load("kernel32.dll"), adv = koffi.load("advapi32.dll"), wts = koffi.load("wtsapi32.dll"), sh = koffi.load("shell32.dll"), ole = koffi.load("ole32.dll");
+  const GUID = koffi.struct("TD_GUID", { a: "uint32", b: "uint16", c: "uint16", d: koffi.array("uint8", 8) });
+  _w32 = { koffi, GUID,
+    sessionOf: k32.func("int __stdcall ProcessIdToSessionId(uint32 pid, _Out_ uint32 *sid)"),
+    userToken: wts.func("int __stdcall WTSQueryUserToken(uint32 sid, _Out_ void **tok)"),
+    impersonate: adv.func("int __stdcall ImpersonateLoggedOnUser(void *tok)"),
+    revert: adv.func("int __stdcall RevertToSelf()"),
+    close: k32.func("int __stdcall CloseHandle(void *h)"),
+    folder: sh.func("int __stdcall SHGetKnownFolderPath(TD_GUID *id, uint32 flags, void *tok, _Out_ void **path)"),
+    free: ole.func("void __stdcall CoTaskMemFree(void *p)") };
+  return _w32;
+}
+function svcUserToken() {
+  try { const w = w32(), s = [0], t = [null]; if (!w.sessionOf(process.pid, s) || !w.userToken(s[0], t) || !t[0]) return null; return t[0]; } catch { return null; }
+}
+function asUser(fn) {
+  const tok = svcUserToken();
+  if (!tok) { if (app.isPackaged) throw new Error("no signed-in user"); return fn(); }   // dev: not SYSTEM, already the user
+  const w = w32();
+  if (!w.impersonate(tok)) { w.close(tok); throw new Error("impersonation failed"); }
+  try { return fn(); } finally { w.revert(); w.close(tok); }
+}
+// The user's real Downloads / Roaming AppData (they can be moved); the profile folder when there is no token (dev).
+function userFolder(guid, fallback) {
+  const tok = svcUserToken(); if (!tok) return fallback;
+  try {
+    const w = w32(), out = [null];
+    const id = { a: guid[0], b: guid[1], c: guid[2], d: guid[3] };
+    if (w.folder(id, 0, tok, out) !== 0 || !out[0]) return fallback;
+    try { return w.koffi.decode(out[0], "char16_t", -1); } finally { w.free(out[0]); }
+  } catch { return fallback; } finally { try { w32().close(tok); } catch {} }
+}
+const FOLDERID_Downloads = [0x374DE290, 0x123F, 0x4565, [0x91, 0x64, 0x39, 0xC4, 0x92, 0x5E, 0x46, 0x7B]];
+const FOLDERID_RoamingAppData = [0x3EB685DB, 0x65F9, 0x4CF6, [0xA0, 0x3A, 0xE3, 0xEF, 0x65, 0x72, 0x9F, 0x3D]];
+const svcOutboxBase = () => path.join(userFolder(FOLDERID_RoamingAppData, path.join(_svcProfRoot, "AppData", "Roaming")), "TryDesk", "svc-outbox");
+if (_serviceHost && _svcProfRoot) { try { _svcProfDir = path.join(userFolder(FOLDERID_RoamingAppData, path.join(_svcProfRoot, "AppData", "Roaming")), "TryDesk"); } catch {} }
+// A name that is just a name on Windows: no folders, no reserved device names, no trailing dots or spaces.
+function winSafeName(name) {
+  let n = path.basename(String(name || "")).replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/[. ]+$/, "").slice(0, 180);
+  if (!n || /^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(n)) n = "file" + (n ? "_" + n : "");
+  return n;
+}
+if (_serviceHost) {
+  ipcMain.handle("svc-outbox-open", (e, id) => {
+    if (!fromMain(e) || !_svcProfRoot || !OUTBOX_ID.test(String(id))) throw new Error("not allowed");
+    const dir = path.join(svcOutboxBase(), String(id));   // (folders are looked up as SYSTEM, before impersonating)
+    return asUser(() => {
+      if (!fs.statSync(dir).isDirectory()) throw new Error("not a folder");
+      const names = fs.readdirSync(dir); if (names.length !== 1) throw new Error("one file expected");
+      const fd = fs.openSync(path.join(dir, names[0]), "r");   // as the user: only what they may read
+      const st = fs.fstatSync(fd);
+      if (!st.isFile()) { fs.closeSync(fd); throw new Error("not a file"); }
+      const rid = `r${++handleSeq}`;
+      readHandles.set(rid, { fd, size: st.size });
+      return { id: rid, name: names[0], size: st.size };
+    });
+  });
+  ipcMain.handle("svc-outbox-done", (e, id) => {
+    if (!fromMain(e) || !_svcProfRoot || !OUTBOX_ID.test(String(id))) return;
+    const dir = path.join(svcOutboxBase(), String(id));
+    try { asUser(() => { for (const n of fs.readdirSync(dir)) fs.unlinkSync(path.join(dir, n)); fs.rmdirSync(dir); }); } catch {}
+  });
+  ipcMain.handle("svc-inbox-open", (e, { name }) => {
+    if (!fromMain(e) || !_svcProfRoot) throw new Error("not allowed");
+    const dir = path.join(userFolder(FOLDERID_Downloads, path.join(_svcProfRoot, "Downloads")), "TryDesk");
+    return asUser(() => {
+      fs.mkdirSync(dir, { recursive: true });   // as the user: theirs, and only where they may write
+      const safe = winSafeName(name), ext = path.extname(safe), base = safe.slice(0, safe.length - ext.length);
+      for (let n = 0; n < 1000; n++) {
+        const target = path.join(dir, n ? `${base} (${n})${ext}` : safe);
+        let fd; try { fd = fs.openSync(target, "wx"); } catch (err) { if (err.code === "EEXIST") continue; throw err; }   // new files only
+        const id = `w${++handleSeq}`;
+        writeHandles.set(id, { fd, path: target });
+        return { id, path: target };
+      }
+      throw new Error("no free name");
+    });
+  });
+} else {
+  // The user's TryDesk: copy a file the person picked into the outbox the service may read (one file per folder).
+  ipcMain.handle("svc-outbox-put", async (e, filePath) => {
+    if (!fromMain(e) || typeof filePath !== "string" || !_pickedPaths.has(filePath)) throw new Error("not allowed");
+    const id = require("crypto").randomBytes(8).toString("hex");
+    const dir = path.join(app.getPath("userData"), "svc-outbox", id);
+    fs.mkdirSync(dir, { recursive: true });
+    const name = winSafeName(path.basename(filePath));
+    await fs.promises.copyFile(filePath, path.join(dir, name));
+    return { id, name, size: fs.statSync(path.join(dir, name)).size };
+  });
+  // Leftovers of a session that ended mid-send (older than a day) go.
+  app.whenReady().then(() => {
+    const box = path.join(app.getPath("userData"), "svc-outbox");
+    try { for (const n of fs.readdirSync(box)) { const d = path.join(box, n); if (Date.now() - fs.statSync(d).mtimeMs > 86400000) fs.rmSync(d, { recursive: true, force: true }); } } catch {}
+  });
+}
 
 // ─── Filesystem browsing (file manager) ──────────────────
 function listDrives() {
@@ -1695,8 +1931,10 @@ ipcMain.handle("disable-input-lock", () => { disableInputLock(); return true; })
 // (a Save dialog can start any program; a link opens a browser as SYSTEM), and file transfer would read or write
 // any file on the PC. All of that is switched off here, after every handler above is registered.
 if (_serviceHost) {
-  const DENY_HANDLE = ["file-pick", "file-save-dialog", "file-open-read", "file-read-chunk", "file-close-read", "file-open-write",
-    "file-open-write-in", "file-write-chunk", "file-close-write", "fs-home", "fs-list", "relaunch-as-admin", "set-login-item",
+  // (file-read-chunk / file-close-read / file-write-chunk / file-close-write stay: they only act on a handle, and here
+  // the only handles come from svc-outbox-open and svc-inbox-open, never from a path.)
+  const DENY_HANDLE = ["file-pick", "file-save-dialog", "file-open-read", "file-open-write",
+    "file-open-write-in", "fs-home", "fs-list", "relaunch-as-admin", "set-login-item",
     "set-hw-accel", "check-update", "lan-host", "lan-open"];
   for (const ch of DENY_HANDLE) { ipcMain.removeHandler(ch); ipcMain.handle(ch, () => { throw new Error("not available in the TryDesk service"); }); }
   for (const ch of ["open-external", "lock-workstation", "set-discord-enabled", "discord-activity"]) ipcMain.removeAllListeners(ch);

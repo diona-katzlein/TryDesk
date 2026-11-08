@@ -42,6 +42,18 @@ contextBridge.exposeInMainWorld("electronAPI", {
   onFastCapturePacket: (cb) => ipcRenderer.on("fast-capture-packet", (_e, p) => cb(p)),
   onFastCaptureInfo: (cb) => ipcRenderer.on("fast-capture-info", (_e, s) => cb(String(s))),
   onFastCaptureEnded: (cb) => ipcRenderer.on("fast-capture-ended", (_e, d) => cb(d)),
+  // One TryDesk with the service (see main.js "One TryDesk"): service host side, then the user's app side.
+  svcFrontendAlive: () => ipcRenderer.invoke("svc-frontend-alive"),
+  svcUiPublish: (ui) => ipcRenderer.send("svc-ui-publish", ui),
+  onSvcCmd: (cb) => ipcRenderer.on("svc-cmd", (_e, c) => cb(c)),
+  onSvcUi: (cb) => ipcRenderer.on("svc-ui", (_e, ui) => cb(ui)),
+  svcUiNow: () => ipcRenderer.invoke("svc-ui-now"),
+  svcCmd: (c) => ipcRenderer.send("svc-cmd", { cmd: String(c?.cmd || ""), req: Number(c?.req) || 0, text: String(c?.text || "").slice(0, 4000) }),
+  // Files in the service's sessions (main.js "File transfer in the service's sessions").
+  svcOutboxPut: (filePath) => ipcRenderer.invoke("svc-outbox-put", String(filePath || "")),
+  svcOutboxOpen: (id) => ipcRenderer.invoke("svc-outbox-open", String(id || "")),
+  svcOutboxDone: (id) => ipcRenderer.invoke("svc-outbox-done", String(id || "")),
+  svcInboxOpen: (name) => ipcRenderer.invoke("svc-inbox-open", { name: String(name || "") }),
   // Service host: the secure desktop (UAC prompt, lock screen) has the input now (true) or not any more (false).
   onSecureDesktop: (cb) => ipcRenderer.on("secure-desktop", (_e, on) => cb(!!on)),
   // Viewer end of the fast path's UDP link (Windows): frames arrive whole from the receiver helper.

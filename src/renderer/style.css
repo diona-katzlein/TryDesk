@@ -1790,7 +1790,7 @@ html:not(.td-mobile) .td-boot { display: none; }
   .rw > span { display: inline-block; animation: rw-up 0.46s var(--ease) both; animation-delay: calc(var(--i) * 115ms); }
   @keyframes rw-up { 0% { transform: translateY(105%); } 80% { transform: translateY(-3%); } 100% { transform: none; } }
   /* A screen or page arriving: up 8 px and in, one beat. */
-  .td-arrive { animation: td-arrive 0.46s var(--ease) both; }
+  .td-arrive { animation: td-arrive 0.46s var(--ease) backwards; }   /* not "both": a kept transform re-frames fixed pages inside (app.js arrive) */
   @keyframes td-arrive { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
   /* Control Center (docked) and the advanced quality panel: in from the right on half a beat, out on a quarter. */
   .control-center.cc-panel-docked:not(.hidden) { animation: cc-in 0.23s var(--ease) both; }
