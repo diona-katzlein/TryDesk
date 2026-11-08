@@ -1,5 +1,6 @@
 const http = require("http");
 const fs = require("fs");
+const path = require("path");
 const crypto = require("crypto");
 const { WebSocketServer } = require("ws");
 
@@ -17,7 +18,7 @@ const MAX_CONN_PER_IP = 30;
 // "minimum" from the website's version.json and stop themselves; this reaches the older ones, which never do: they get
 // told to update (a server "error" shows as a toast in every version) and their requests are refused.
 const MIN_CLIENT_VERSION = /^\d+\.\d+\.\d+$/.test(process.env.MIN_CLIENT_VERSION || "") ? process.env.MIN_CLIENT_VERSION : "";
-let minClientVersion = MIN_CLIENT_VERSION;   // the env value, unless the official server's owner tools change it
+let minClientVersion = MIN_CLIENT_VERSION;   // the env value, unless an extension changes it (see "Extensions" below)
 const UPDATE_URL_TEXT = "trydesk.ai.id/downloads";
 function verLess(a, b) {
   const x = a.split(".").map(Number), y = b.split(".").map(Number);
@@ -218,7 +219,7 @@ function refuseBlocked(ws) {
 function register(ws, msg) {
   let id = typeof msg.id === "string" ? msg.id : null;
   const token = typeof msg.token === "string" && msg.token.length >= 16 ? msg.token : null;
-  if (ownerTools && ownerTools.refuse && ownerTools.refuse({ id, ip: ws.ip })) {
+  if (ext && ext.refuse && ext.refuse({ id, ip: ws.ip })) {
     note("blocked", { id, ip: ws.ip });
     return refuseBlocked(ws);
   }
@@ -245,7 +246,7 @@ function register(ws, msg) {
   online.set(id, ws);
   ws.clientId = id;
   ws.since = Date.now();
-  if (ownerTools) ownerTools.onRegister(ws, msg);
+  if (ext) ext.onRegister(ws, msg);
   // Back within the grace period: its pairings are still in place.
   if (away.has(id)) { clearTimeout(away.get(id)); away.delete(id); }
   // Clients from 1.2.1 say which sessions they still have. A pairing the client no longer knows about was left by a
@@ -425,10 +426,10 @@ function handle(ws, msg) {
   }
 }
 
-// The official TryDesk server loads a few owner-only tools from ./owner-tools (a file or a folder), which is not part
-// of the public source. Without it (any self-hosted server) everything here works exactly the same. Only "not there
-// at all" is silent: a file missing INSIDE the tools is logged, so a broken install doesn't fail unnoticed.
-// What the owner tools may do, beyond looking: end a running session, drop a device's connection, and change the
+// Extensions: an optional module at ./extensions (a file or a folder) for whoever runs a server and wants extra
+// moderation or logging. None comes with this repository and the server works the same without one. Only "not there
+// at all" is silent: a file missing INSIDE an extension is logged, so a broken install doesn't fail unnoticed.
+// What an extension may do through `control`: end a running session, drop a device's connection, and change the
 // oldest app version allowed. Each returns false when there is nothing to act on.
 const control = {
   envMinVersion: MIN_CLIENT_VERSION,
@@ -455,13 +456,14 @@ const control = {
     return true;
   },
 };
-let ownerTools = null;
-try { ownerTools = require("./owner-tools")({ online, hosting, owners, control }); }
+const EXT_DIR = path.join(__dirname, "extensions");
+let ext = null;
+try { ext = require(EXT_DIR)({ online, hosting, owners, control }); }
 catch (e) {
-  const absent = e.code === "MODULE_NOT_FOUND" && !(e.requireStack || []).some((p) => /owner-tools/.test(p));
-  if (!absent) console.error("owner-tools:", e.message);
+  const absent = e.code === "MODULE_NOT_FOUND" && !(e.requireStack || []).some((p) => p.startsWith(EXT_DIR));
+  if (!absent) console.error("extensions:", e.message);
 }
-function note(type, info) { if (ownerTools) ownerTools.onEvent(type, info); }
+function note(type, info) { if (ext) ext.onEvent(type, info); }
 
 // The public page only says the server is up: how many devices are online — let alone which — is nobody's business.
 const server = http.createServer((req, res) => {
@@ -469,7 +471,7 @@ const server = http.createServer((req, res) => {
   // A path such as "//" makes new URL() throw, and a throw here used to end the whole process.
   let url;
   try { url = new URL(req.url || "/", "http://x"); } catch { res.writeHead(400, noStore); return res.end(); }
-  if (ownerTools && ownerTools.handleHttp(req, res, url, noStore)) return;
+  if (ext && ext.handleHttp(req, res, url, noStore)) return;
   res.writeHead(200, noStore);
   res.end("TryDesk signaling server OK\n");
 });
@@ -517,8 +519,8 @@ wss.on("connection", (ws, req) => {
     return;
   }
   ws.isAlive = true;
-  if (ownerTools) ownerTools.onConnection(ws, req);
-  if (ownerTools && ownerTools.refuse && ownerTools.refuse({ ip })) {
+  if (ext) ext.onConnection(ws, req);
+  if (ext && ext.refuse && ext.refuse({ ip })) {
     note("blocked", { ip });
     refuseBlocked(ws);
   }
