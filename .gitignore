@@ -23,10 +23,10 @@ deploy/.env
 id_rsa*
 id_ed25519*
 android-signing.properties
-# Owner-only server tools and config (never public)
-owner-private/
+# Local-only folders, server extensions and compose overrides (see server/signaling-server.js "Extensions")
+*-private/
+server/extensions/
 docker-compose.override.yml
-owner-tools.js
 *.pem
 *.key
 # Code-signing certificates — never commit
