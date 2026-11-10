@@ -11,9 +11,16 @@ const TURN_PORT = Number(process.env.TURN_PORT) || 3478;
 const TURN_TTL = 2 * 3600;   // short-lived TURN credentials limit sniff-and-reuse to ~2h
 const OWNERS_FILE = process.env.OWNERS_FILE || "";
 const OWNERS_CAP = 100000;   // bound the reserved-ID map so churn can't exhaust disk/memory
-const MAX_MSG_PER_SEC = 100; // per-socket message flood cap (ICE can burst, so leave headroom)
-const MAX_CONNREQ_PER_10S = 5;
-const MAX_CONN_PER_IP = 30;
+// Flood limits. The defaults below; an extension may change them while the server runs (control.setLimits).
+//   msgPerSec          messages per second on one connection (ICE can burst, so leave headroom)
+//   connReqPer10s      connection requests per 10 s from one connection
+//   connReqPerIp10s    the same, per client IP (an office behind one NAT gets four times one connection's share)
+//   connPerIp          connections open at once from one IP
+//   incomingPerMin     prompts one PC may get per minute, from everyone together
+//   incomingPerIpPerMin  prompts one PC may get per minute from one IP
+const LIMIT_DEFAULTS = Object.freeze({ msgPerSec: 100, connReqPer10s: 5, connReqPerIp10s: 20, connPerIp: 30, incomingPerMin: 30, incomingPerIpPerMin: 6 });
+const LIMIT_RANGE = { msgPerSec: [20, 1000], connReqPer10s: [1, 50], connReqPerIp10s: [2, 200], connPerIp: [2, 500], incomingPerMin: [2, 300], incomingPerIpPerMin: [1, 60] };
+const limits = { ...LIMIT_DEFAULTS };
 // Oldest app version allowed to connect ("" = no check; self-hosted servers leave it unset). Apps from 1.2.8 also read
 // "minimum" from the website's version.json and stop themselves; this reaches the older ones, which never do: they get
 // told to update (a server "error" shows as a toast in every version) and their requests are refused.
@@ -167,16 +174,14 @@ function capOwners() {
 function rateOk(ws) {
   const now = Date.now();
   if (now - (ws.rlStart || 0) > 1000) { ws.rlStart = now; ws.rlCount = 0; }
-  return (++ws.rlCount) <= MAX_MSG_PER_SEC;
+  if (++ws.rlCount === limits.msgPerSec + 1) note("msg-flood", { id: ws.clientId || "", ip: ws.ip });   // once per second at most
+  return ws.rlCount <= limits.msgPerSec;
 }
 // The per-socket budget alone was reset by simply reconnecting, so the same budgets are also kept per client IP
 // (an office behind one NAT gets four times a single socket's share) and per target: no PC gets more than
-// MAX_INCOMING_PER_MIN prompts a minute, however many IPs ask — a flood could otherwise keep it "busy" for everyone.
+// limits.incomingPerMin prompts a minute, however many IPs ask — a flood could otherwise keep it "busy" for everyone.
 // The per-target budget is counted per asking IP first, so one hostile sender can't use up a PC's whole budget and
 // lock everyone else out; the overall per-target cap only bites when many IPs pile on together.
-const MAX_CONNREQ_PER_IP_10S = 20;
-const MAX_INCOMING_PER_MIN = 30;
-const MAX_INCOMING_PER_IP_PER_MIN = 6;
 const ipReqTimes = new Map();      // ip -> [timestamps]
 const targetReqTimes = new Map();  // targetId -> [timestamps]
 const pairReqTimes = new Map();    // "targetId|ip" -> [timestamps]
@@ -190,15 +195,15 @@ function withinBudget(map, key, windowMs, max, now) {
 function connReqOk(ws) {
   const now = Date.now();
   ws.crTimes = (ws.crTimes || []).filter((t) => now - t < 10000);
-  if (ws.crTimes.length >= MAX_CONNREQ_PER_10S) return false;
-  if (!withinBudget(ipReqTimes, ws.ip || "?", 10000, MAX_CONNREQ_PER_IP_10S, now)) return false;
+  if (ws.crTimes.length >= limits.connReqPer10s) return false;
+  if (!withinBudget(ipReqTimes, ws.ip || "?", 10000, limits.connReqPerIp10s, now)) return false;
   ws.crTimes.push(now);
   return true;
 }
 function incomingOk(target, ip) {
   const now = Date.now();
-  return withinBudget(pairReqTimes, `${target}|${ip || "?"}`, 60000, MAX_INCOMING_PER_IP_PER_MIN, now)
-    && withinBudget(targetReqTimes, target, 60000, MAX_INCOMING_PER_MIN, now);
+  return withinBudget(pairReqTimes, `${target}|${ip || "?"}`, 60000, limits.incomingPerIpPerMin, now)
+    && withinBudget(targetReqTimes, target, 60000, limits.incomingPerMin, now);
 }
 // Drop expired entries so the two maps stay small (called from the keep-alive sweep).
 function sweepReqBudgets() {
@@ -219,7 +224,9 @@ function refuseBlocked(ws) {
 function register(ws, msg) {
   let id = typeof msg.id === "string" ? msg.id : null;
   const token = typeof msg.token === "string" && msg.token.length >= 16 ? msg.token : null;
-  if (ext && ext.refuse && ext.refuse({ id, ip: ws.ip })) {
+  // known = this device already owns its ID (false = signing in would hand out a new one)
+  const known = !!(id && token && /^\d{3} \d{3} \d{3}$/.test(id) && ownerMatches(id, token));
+  if (ext && ext.refuse && ext.refuse({ id, ip: ws.ip, known })) {
     note("blocked", { id, ip: ws.ip });
     return refuseBlocked(ws);
   }
@@ -429,9 +436,23 @@ function handle(ws, msg) {
 // Extensions: an optional module at ./extensions (a file or a folder) for whoever runs a server and wants extra
 // moderation or logging. None comes with this repository and the server works the same without one. Only "not there
 // at all" is silent: a file missing INSIDE an extension is logged, so a broken install doesn't fail unnoticed.
-// What an extension may do through `control`: end a running session, drop a device's connection, and change the
-// oldest app version allowed. Each returns false when there is nothing to act on.
+// What an extension may do through `control`: end a running session, drop a device's connection, change the oldest
+// app version allowed, and change the flood limits. Each returns false when there is nothing to act on.
 const control = {
+  limitDefaults: LIMIT_DEFAULTS,
+  limitRange: LIMIT_RANGE,
+  limits: () => ({ ...limits }),
+  // Whole numbers inside LIMIT_RANGE only; a missing key goes back to its default. All or nothing.
+  setLimits(next) {
+    const out = {};
+    for (const k of Object.keys(LIMIT_DEFAULTS)) {
+      const v = next && next[k] !== undefined && next[k] !== null ? Number(next[k]) : LIMIT_DEFAULTS[k];
+      if (!Number.isInteger(v) || v < LIMIT_RANGE[k][0] || v > LIMIT_RANGE[k][1]) return false;
+      out[k] = v;
+    }
+    Object.assign(limits, out);
+    return true;
+  },
   envMinVersion: MIN_CLIENT_VERSION,
   minVersion: () => minClientVersion,
   setMinVersion(v) {
@@ -512,7 +533,7 @@ wss.on("connection", (ws, req) => {
   ws.ua = String(req.headers["user-agent"] || "").slice(0, 300);
   ws.sysId = /^\s*id\b/i.test(String(req.headers["accept-language"] || ""));   // system language Indonesian
   ipCounts.set(ip, (ipCounts.get(ip) || 0) + 1);
-  if (ipCounts.get(ip) > MAX_CONN_PER_IP) {
+  if (ipCounts.get(ip) > limits.connPerIp) {
     ipCounts.set(ip, ipCounts.get(ip) - 1);
     note("ip-limit", { req });
     try { ws.close(1013, "too many connections"); } catch {}

@@ -867,6 +867,8 @@ const PW_HASH_RE = /^[0-9a-f]{32}:[0-9a-f]{64}$/;
 ipcMain.handle("service-status", () => new Promise((resolve) => {
   if (process.platform !== "win32" || _serviceHost) return resolve({ supported: false });
   let id = ""; try { id = fs.readFileSync(_serviceIdFile, "utf8").trim().replace(/\D/g, "").slice(0, 12); } catch {}
+  // Dev builds only (tests): a dev service host with a fake %ProgramData% counts as the running service.
+  if (!app.isPackaged && process.env.TRYDESK_TEST_SVC_RUNNING === "1") return resolve({ supported: true, installed: true, state: "RUNNING", id });
   require("child_process").execFile("sc.exe", ["query", "TryDeskService"], { windowsHide: true }, (err, out) => {
     const m = /STATE\s*:\s*\d+\s+(\w+)/.exec(String(out || ""));
     resolve({ supported: app.isPackaged && fs.existsSync(_serviceExe), installed: !!m, state: m ? m[1] : "", id });
@@ -956,6 +958,41 @@ ipcMain.handle("service-attach-console", () => {
 ipcMain.on("service-id", (_e, id) => {
   if (!_serviceHost) return;
   try { fs.writeFileSync(_serviceIdFile, String(id || "").replace(/\D/g, "").slice(0, 12)); } catch {}
+});
+// "Generate new ID" while the service runs (owner's video 8 Nov: the button said "new ID" and showed the same number,
+// Home kept the service's ID). The PC's ID belongs to the service, so a new one is an administrator's step like the
+// service password: one UAC prompt drops a request file in %ProgramData%\TryDesk (SYSTEM/Administrators write only),
+// and the service's host, which watches it, signs in fresh.
+const _regenReqFile = path.join(_serviceDir, "regen-id.req");
+ipcMain.handle("service-regen-id", () => new Promise((resolve) => {
+  if (process.platform !== "win32" || _serviceHost) return resolve({ ok: false, code: -1 });
+  // Fixed text, no input from anywhere: the elevated PowerShell finds the folder from its own %ProgramData%.
+  const inner = Buffer.from("Set-Content -LiteralPath (Join-Path $env:ProgramData 'TryDesk\\regen-id.req') -Value 1 -ErrorAction Stop", "utf16le").toString("base64");
+  const ps = require("child_process").spawn("powershell.exe", ["-NoProfile", "-WindowStyle", "Hidden", "-Command",
+    "try { $p = Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile','-WindowStyle','Hidden','-EncodedCommand',$env:TD_INNER -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ErrorAction Stop; exit $p.ExitCode } catch { exit 1223 }"],
+    { stdio: "ignore", windowsHide: true, env: { ...process.env, TD_INNER: inner } });
+  ps.on("exit", (code) => { logInfo("service regen-id request exit " + code); resolve({ ok: code === 0, code }); });
+  ps.on("error", () => resolve({ ok: false, code: 1 }));
+}));
+if (_serviceHost) app.whenReady().then(() => setInterval(() => {
+  if (!fs.existsSync(_regenReqFile)) return;
+  try { fs.unlinkSync(_regenReqFile); } catch { return; }
+  logInfo("service host: new ID requested by an administrator");
+  try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("svc-regen-id"); } catch {}
+}, 1000));
+// The app's own identity back from identity.json when its storage lost it: localStorage reaches the disk a few
+// seconds late, so a TryDesk closed hard right after its first sign-in (an update's installer, a crash, power off)
+// came back with a new ID (Threads report T21, proven 9 Nov). identity.json is written at once.
+ipcMain.handle("read-identity", () => {
+  if (_serviceHost) return null;
+  const j = readIdentityFile();
+  return ID_RE.test(j.id) && TOKEN_RE.test(j.token) ? { id: j.id, token: j.token } : null;
+});
+// After the service got a new ID the old one is retired: nothing may bring it back (keeps the language).
+ipcMain.on("forget-identity", () => {
+  if (_serviceHost) return;
+  const lang = readIdentityFile().lang;
+  try { fs.writeFileSync(_identityFile, JSON.stringify(lang ? { lang } : {})); } catch {}
 });
 
 // One TryDesk window during a session (owner's report 7 Nov: the app's Home on the left and the service's "This PC is
@@ -1533,6 +1570,21 @@ ipcMain.handle("file-pick", async () => {
     _pickedPaths.add(p);
     return { path: p, name: path.basename(p), size: st.size };
   });
+});
+
+// Drag and drop (users' reports 9 Nov): files dropped on the window count as picked, like the Open dialog. Folders and
+// anything that is not a plain file are left out (the renderer says so).
+ipcMain.handle("file-dropped", (e, paths) => {
+  if (_serviceHost || !fromMain(e) || !Array.isArray(paths)) return { files: [], skipped: 0 };   // SYSTEM's window sends nothing it was handed
+  const files = []; let skipped = 0;
+  for (const p of paths.slice(0, 50)) {
+    if (typeof p !== "string" || !path.isAbsolute(p)) { skipped++; continue; }
+    let st = null; try { st = fs.statSync(p); } catch {}
+    if (!st || !st.isFile()) { skipped++; continue; }
+    _pickedPaths.add(p);
+    files.push({ path: p, name: path.basename(p), size: st.size });
+  }
+  return { files, skipped };
 });
 
 ipcMain.handle("file-save-dialog", async (_e, name) => {

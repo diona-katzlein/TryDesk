@@ -1,256 +1,209 @@
-# TryDesk
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/banner-a-dark.png">
+    <img src="docs/readme/banner-a-light.png" alt="TryDesk. Free remote desktop, no account." width="720">
+  </picture>
+</p>
 
-**Free, open-source remote desktop software.** Control another computer over the
-internet — see its screen and use its mouse and keyboard — like TeamViewer or
-AnyDesk, but free and self-hostable. It uses a direct peer-to-peer connection
-(WebRTC), so your screen and files travel straight between the two computers,
-not through a middle server.
+<p align="center">
+  Control a Windows PC from another Windows PC, a Mac, Linux or an Android phone.<br>
+  The two devices connect directly, so your screen and files never pass through our server.
+</p>
 
-Website: [trydesk.ai.id](https://trydesk.ai.id)
+<p align="center">
+  <a href="https://trydesk.ai.id/downloads/"><b>Download</b></a>
+  &nbsp;·&nbsp;
+  <a href="https://trydesk.ai.id/docs/">How to use it</a>
+  &nbsp;·&nbsp;
+  <a href="#run-it-from-source">Run from source</a>
+  &nbsp;·&nbsp;
+  <a href="https://trydesk.ai.id/donate/">Donate</a>
+  <br>
+  <b>English</b> &nbsp;·&nbsp; <a href="docs/README.id.md">Bahasa Indonesia</a>
+</p>
 
-> **Status:** early, actively developed by one person. Windows can control and be controlled; macOS (since 1.3.0),
-> Linux (AppImage/deb) and Android can control a Windows PC but can't be controlled. iOS is not started. Builds are
-> not code-signed yet: Windows SmartScreen warns on first run, and on a Mac you run `xattr -cr /Applications/TryDesk.app`
-> once; every download's SHA-256 is published on the site.
+## Connect in three steps
 
----
+### 1. The PC that needs help shares its ID
 
-## New to this project? Start here
+<p><img src="docs/readme/en/home.webp" alt="Home screen with this PC's 9-digit ID in large digits" width="100%"></p>
 
-TryDesk has two parts that work together:
+Open TryDesk on the PC you want to reach. Its 9-digit ID is the big number on the left. Send that number to the person who will help.
 
-1. **The desktop app** (`src/`) — the program people install and run. It shows
-   the screen, sends mouse/keyboard input, and transfers files. Built with
-   [Electron](https://www.electronjs.org/) (basically a web app — HTML, CSS,
-   JavaScript — wrapped in a desktop window).
-2. **The signaling server** (`server/`) — a small Node.js program. When two apps
-   want to connect, this server just **introduces them to each other** (exchanges
-   their connection details). After that it steps aside — it never sees your
-   screen or files.
+### 2. Type the ID on your side
 
-(The marketing/download site at trydesk.ai.id is maintained separately and isn't
-part of this source.)
+<p><img src="docs/readme/en/connect.webp" alt="The other PC's ID typed into the Connect field" width="100%"></p>
 
-**How a connection works, in plain terms:** Computer A wants to control
-Computer B. Both apps register with the signaling server and get a 9-digit ID.
-A enters B's ID, the server passes a few "let's connect" messages between them,
-and then A and B talk **directly** to each other (encrypted). If a strict
-network blocks the direct path, traffic falls back through a TURN relay server.
+On your own device, type the ID and press **Connect**. If the other PC has an access password, type it too.
 
-If you're new to programming, the friendliest place to read code first is
-`src/renderer/app.js` (the app's UI logic) — it's plain JavaScript.
+### 3. The other side accepts
 
----
+<p><img src="docs/readme/en/accept.webp" alt="Incoming request screen with Reject and Accept buttons and a warning about scammers" width="100%"></p>
+
+The other PC shows who is asking and what they will be able to do. Nothing happens until someone there presses **Accept**.
+
+### Then you are in
+
+<p><img src="docs/readme/en/session.webp" alt="A TryDesk session: the remote PC's desktop fills the window, with tabs, Control Center and Disconnect at the top." width="100%"></p>
+
+The other PC's screen fills your window, and your mouse and keyboard work on it. Several PCs can be open at once, each in its own tab.
+
+## Which device can do what
+
+| Device | Can control | Can be controlled |
+| --- | --- | --- |
+| Windows 10, 11 | Yes | Yes |
+| macOS 13+ | Yes | No |
+| Linux | Yes | No |
+| Android 7.0+ | Yes | No |
+
+Downloads: installer or portable .exe for Windows, .zip for Apple Silicon and Intel Macs, AppImage or .deb for Linux, and a 3 MB APK for Android.
+
+## How a connection works
+
+<p>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/how-it-connects-dark.png">
+    <img src="docs/readme/how-it-connects-light.png" alt="Your PC and the Windows PC both talk to the signaling server once, then connect directly. A TURN relay is used only when a firewall blocks the direct path." width="100%">
+  </picture>
+</p>
+
+Each app gets a 9-digit ID from the signaling server. You type the other PC's ID, the server passes a few setup messages between the two, and from then on they talk directly over WebRTC, encrypted with DTLS-SRTP. The server never sees the screen or the files. On a network that blocks direct connections, the traffic goes through a TURN relay instead.
+
+## In a session
+
+<p>
+  <img src="docs/readme/en/files.webp" alt="File transfer: this PC on the left, the remote PC on the right" width="49%">
+  <img src="docs/readme/en/chat.webp" alt="Chat panel next to the remote screen" width="49%">
+</p>
+
+Copy files both ways in a two-panel file manager, and chat with the person on the other side without leaving the session.
+
+<p>
+  <img src="docs/readme/en/quality.webp" alt="Picture quality settings in Control Center" width="49%">
+  <img src="docs/readme/en/monitor.webp" alt="Choosing which of the remote PC's monitors to show" width="49%">
+</p>
+
+Change frame rate, bitrate, resolution and codec while you work, and switch between the remote PC's monitors.
+
+<p><img src="docs/readme/en/android.webp" alt="The Android app controlling a Windows PC, with its toolbar at the bottom" width="100%"></p>
+
+On an Android phone, the toolbar gives you the keyboard, special keys, touch or touchpad mode and game mode.
 
 ## Features
 
-- **Low-latency P2P** — direct WebRTC video + input, no media through the server
-- **Instant full resolution** — the remote screen opens sharp, without a ramp-up
-- **Game mode** — relative mouse capture so pointer-locking games (Minecraft, FPS) work
-- **Full keyboard** — forwards system shortcuts (Alt+Tab, Win) to the remote PC
-- **Multi-monitor** — switch between the host's displays mid-session
-- **Multi-remote tabs** — control several machines at once, each in its own tab
-- **High frame rate** — up to **240 FPS** on a Windows host through the fast path (DXGI capture + GPU H.264 in `trydesk-capture.exe`); above 120 FPS needs a host monitor that refreshes that fast, and the actual rate depends on the host/viewer hardware and on-screen content
-- **High bitrate** — up to **1000 Mbps** between two Windows PCs on one local network over the fast path's own encrypted UDP link (measured 820 Mbps on one PC); 300 Mbps over WebRTC / the data channel elsewhere
-- **Real-time quality control** — bitrate / FPS / resolution + codec (AV1, VP9, VP8, H.264)
-- **Two-pane file manager** — browse local & remote folders, transfer both ways
-- **Chat** — in-session messaging with in-app and native notifications
-- **Clipboard sync & audio** — shared clipboard and remote audio
-- **Privacy** — blank the host screen and lock its input during a session. The black cover spans every monitor
-  (also one plugged in mid-session), stays through a short connection drop, and is refused with a message when
-  Windows can't hide it from screen capture (Windows 10 before 2004)
-- **Button feel** — the main buttons spring under a press and make a quiet click (CC0 sounds, see NOTICE); no
-  motion when the system asks for reduced motion, no sound during a session, and a switch in Settings
-- **Access control** — per-device IDs (regenerate anytime for security), an optional connection password
-  (wrong answers are throttled per requester; no password still gets the normal Accept prompt), and host-side
-  permissions for control / files / clipboard — view-only also blocks file and clipboard access
-- **Session recording** — streamed straight to a .webm file on disk (no RAM build-up on long sessions)
-- **Settings that act** — start with Windows, upload bandwidth cap, session time limit, lock Windows after a
-  session, keep the display awake while hosting, P2P-only / relay-only, default quality / codec / scale
-- **Discord Rich Presence** — shows "Using TryDesk" on your Discord profile (silent if Discord isn't running; can be turned off)
-- **Dark & light themes**, full Indonesian / English UI (follows the Windows language until you pick one)
-- **Android app (viewer)** — control a Windows PC from your phone: touchpad or direct touch, two-finger
-  scroll / right click, pinch zoom, the phone keyboard (autocorrect + emoji) and a special-keys bar, devices as a
-  grid or a list, screenshots and session recordings into the gallery. The phone controls PCs but can't be
-  controlled itself. ~3 MB APK, Android 7.0+
-- **Connect by IP on a LAN** — two devices on one network connect with no internet and no server: off by default,
-  local addresses only, and only with an access password of at least 10 characters (see SECURITY.md)
-- **Update notice** — the app reads `https://trydesk.ai.id/version.json`: a newer release shows a dismissable notice;
-  a version below the published safe minimum refuses connections until it is updated
+### Control
+- Full keyboard, including Alt+Tab and the Windows key
+- Game mode with relative mouse, for games that lock the pointer
+- Several monitors on the host, switchable mid-session
+- Several remote PCs at once, each in its own tab
 
----
+### Picture
+- Up to 240 FPS from a Windows host through the fast path; the host monitor has to refresh that fast
+- AV1, VP9, VP8 and H.264, changeable during the session
 
-## Architecture
+### Also
+- Shared clipboard, remote audio and session recording to .webm
+- Connect by IP on a local network, with no internet and no server
+- Indonesian and English, dark and light theme
 
-| Piece | Path | Tech |
-|-------|------|------|
-| Desktop app | `src/` | Electron 45 (main / preload / renderer), `koffi` FFI → `user32.dll` for mouse/keyboard input |
-| Android app | `mobile/` | Capacitor 8 wrapping the **same** renderer (`src/renderer`) + a phone layer (touch, keyboard, toolbar) |
-| Signaling server | `server/` | Node.js + `ws` WebSocket; relays the handshake, hands out IDs |
-| TURN / HTTPS | `deploy/` | Docker Compose: coturn (relay) + Caddy (automatic TLS) + the signaling server |
+## Is it safe?
 
-Media and control data flow **directly between peers** and are end-to-end
-encrypted (DTLS-SRTP). The signaling server only brokers the first handshake;
-it never sees the screen or files. A TURN relay is used **only** when a direct
-peer-to-peer path is impossible.
+- The screen, mouse, keyboard and files travel directly between the two devices, encrypted. Our server only introduces them.
+- The controlled PC decides: it can refuse, ask for an access password, or allow view-only. Control, files and clipboard can each be turned off.
+- During a session the host's screen can be blacked out and its input locked, and a device can get a new ID at any time.
+- The request screen warns that banks, shops and official services never need to control your PC.
+- Every download's SHA-256 is on [the website](https://trydesk.ai.id/downloads/), and all of the code is here.
 
-### Where things live in the code
+> [!NOTE]
+> Builds are not code-signed yet, so Windows SmartScreen warns the first time: choose **More info**, then **Run anyway**. On a Mac, run `xattr -cr /Applications/TryDesk.app` once.
 
-```
-src/                     The desktop app (Electron)
-  main.js                  Main process: screen capture, input injection, file IO, window
-  preload.js               Safe bridge between the UI and the main process
-  input-simulator.js       Native mouse/keyboard + low-level hooks (via koffi)
-  discord-rpc.js           Optional Discord Rich Presence (best-effort, silent if unavailable)
-  config.json              Which signaling server the app connects to
-  renderer/                The UI you see
-    index.html               Markup for every screen
-    app.js                   All UI logic + WebRTC (the biggest file; start here)
-    style.css                Styling + light/dark theme tokens
-mobile/                  The Android app (viewer) — see mobile/README.md
-  build-www.mjs            Assembles the phone bundle from src/renderer + mobile/web
-  web/                     Phone layer: electronAPI shim, touch/keyboard/toolbar, phone CSS
-  android/                 Capacitor's Android project (Gradle); native plugins TdScreenPlugin (full screen)
-                           and TdLanPlugin (connect by IP)
-server/
-  signaling-server.js      The "introducer" server
-  Dockerfile               How to containerize it
-deploy/                    One-command self-hosting (Docker Compose, Caddy, coturn)
-  .env.example             Copy to .env and fill in your domain + TURN secret
-  setup.sh                 First-time VPS setup helper
-assets/                    App icon, logo & UI fonts
-scripts/                   Release + build helpers: buat-rilis.ps1 (one-command release), build-linux.sh (WSL), build-mac.sh (on a Mac),
-                           after-pack.js, diagnose.ps1
-docs/                      CARA-PAKAI.md: the full setup guide (Bahasa Indonesia)
-```
+Found a security problem? Follow [`SECURITY.md`](SECURITY.md) instead of opening a public issue.
 
----
+## Run it from source
 
-## Getting started (run it from source)
-
-**1. Install the tools** (one-time):
-- [Node.js](https://nodejs.org/) version 22.12 or newer (this also installs `npm`).
-- Building the **desktop app** requires **Windows** (it uses Windows input APIs).
-
-**2. Get the code and its dependencies:** clone the repo from GitHub, or download the source zip from
-<https://trydesk.ai.id/source/> (every version is listed there with its SHA-256) and unzip it. Then:
+You need [Node.js](https://nodejs.org/) 22.12 or newer. The desktop app builds on Windows only.
 
 ```bash
 git clone https://github.com/TryDesk/TryDesk.git
 cd TryDesk
-npm install          # downloads the libraries listed in package.json
+npm install
+npm run dev     # starts the signaling server and the app together
 ```
 
-You can also read every file online at <https://github.com/TryDesk/TryDesk> or <https://trydesk.ai.id/source/code/>.
+The app uses the public signaling server unless you change `signalingServer` in `src/config.json`.
 
-**3. Run it in development:**
-
-```bash
-npm run dev          # starts the signaling server AND the app together
-```
-
-By default the app connects to the public signaling server. To use your own,
-edit `src/config.json` and change `signalingServer` to your server's address.
-
-### Build the Windows app (creates the .exe files)
+<details>
+<summary><b>Build the Windows app</b></summary>
 
 ```bash
-npm run build            # portable + installer  ->  dist/
+npm run build            # portable + installer, into dist/
 npm run build:portable   # portable .exe only
-npm run build:installer  # NSIS installer only
+npm run build:installer  # installer only
 ```
 
-The finished files appear in the `dist/` folder. Each build also writes its size + SHA-256; users can check a
-download with `Get-FileHash .\TryDesk-Portable-<version>.exe` (PowerShell).
+Each build writes its size and SHA-256 next to the files.
+</details>
 
-### Build the macOS app
+<details>
+<summary><b>Build the macOS and Linux apps</b></summary>
 
 ```bash
-bash scripts/build-mac.sh                       # on a Mac: Apple Silicon + Intel .zip  ->  dist/
-bash scripts/build-mac-wsl.sh /mnt/c/path/to/project   # in WSL Ubuntu (no Mac)  ->  dist-mac/
+bash scripts/build-mac.sh                             # on a Mac
+bash scripts/build-mac-wsl.sh /mnt/c/path/to/project  # in WSL, without a Mac
+bash scripts/build-linux.sh /mnt/c/path/to/project    # in WSL, into dist-linux/
 ```
 
-On a Mac the zips get a full ad-hoc signature (no Apple account needed). From WSL they keep Electron's own ad-hoc
-signatures, since electron-builder can't sign on Linux. The app needs macOS 13 Ventura or newer. Step-by-step guide and
-test checklist (Bahasa Indonesia): [`docs/BUILD-MAC.md`](docs/BUILD-MAC.md).
+Step-by-step Mac guide: [`docs/BUILD-MAC.md`](docs/BUILD-MAC.md).
+</details>
 
-### Build the Android app (APK)
+<details>
+<summary><b>Build the Android app</b></summary>
 
 Needs JDK 21 and the Android SDK (platform 36). Details in [`mobile/README.md`](mobile/README.md).
 
 ```bash
 cd mobile
 npm install
-npm run apk:debug        # -> mobile/android/app/build/outputs/apk/debug/app-debug.apk
+npm run apk:debug
 ```
+</details>
 
-### Self-host the signaling server
-
-You only need this if you want to run your own server instead of the public one.
+<details>
+<summary><b>Run your own signaling server</b></summary>
 
 ```bash
 cd deploy
-cp .env.example .env      # then open .env and set your domain + a TURN secret
+cp .env.example .env      # set your domain and a TURN secret
 docker compose up -d --build
 ```
 
-Caddy automatically gets an HTTPS certificate for your domain, and coturn
-provides the TURN relay. `deploy/setup.sh` walks through a full first-time
-setup on a fresh Ubuntu server.
+Caddy gets the HTTPS certificate and coturn runs the TURN relay. `deploy/setup.sh` walks through a fresh Ubuntu server.
+</details>
 
----
+<details>
+<summary><b>Where things live in the code</b></summary>
 
-## Troubleshooting
-
-- **`npm install` fails** — make sure Node.js 22.12+ is installed: run `node -v`.
-- **App won't start / blank window** — some GPUs need software rendering; launch
-  with `--no-gpu`. Startup problems are logged to
-  `%APPDATA%\TryDesk\trydesk-crash.log` (see `scripts/diagnose.ps1`).
-- **Windows Sandbox / Hyper-V VM shuts down when a session starts** — GPU-accelerated
-  screen capture through a virtual GPU (GPU-PV) can terminate the whole VM. TryDesk
-  detects Windows Sandbox and Hyper-V guests and runs in software mode there
-  (`--force-gpu` overrides).
-- **A monitor can't be selected / shows another screen** — on some PCs (HDR on,
-  or a monitor on a second GPU) Windows' default capturer can't see that monitor.
-  TryDesk detects this at launch and restarts once with Windows Graphics Capture.
-  Each capture and re-capture is logged to `%APPDATA%\TryDesk\trydesk-crash.log`.
-- **"Unknown publisher" warning on Windows** — the app isn't signed with a paid
-  certificate yet. It's safe to run (open-source, you can read every line).
-  Code signing is planned.
-- **Connection always uses the relay / fails** — a strict firewall is blocking
-  the direct path; this is normal on some networks and still works.
-
----
+```
+src/            Desktop app (Electron 45)
+  main.js         Screen capture, input, files, windows
+  renderer/       The UI; app.js is the place to start reading
+mobile/         Android app (Capacitor 8, same renderer)
+server/         Signaling server (Node.js + ws)
+deploy/         Docker Compose: signaling, Caddy, coturn
+scripts/        Release and build helpers
+docs/           Guides
+```
+</details>
 
 ## Contributing
 
-Issues and pull requests on [GitHub](https://github.com/TryDesk/TryDesk) are welcome — including from first-time
-contributors. No GitHub account? Email support@trydesk.ai.id instead.
-Please keep the UI consistent with the existing design and test your changes in
-the app before submitting. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for a
-beginner-friendly walkthrough, and [`SECURITY.md`](SECURITY.md) to report a
-vulnerability privately.
+Issues and pull requests are welcome, including first ones. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. No GitHub account? Email support@trydesk.ai.id.
 
-## Support the project
+## Made by one person
 
-TryDesk is free and has no ads or paid tier. If it's useful to you, a donation helps pay for the signaling and
-relay servers: [donate on SociaBuzz](https://sociabuzz.com/drweabo/tribe) (also linked from the **Sponsor** button
-above and the site's [Donate page](https://trydesk.ai.id/donate/)). Reporting bugs and sharing TryDesk helps just as
-much.
+TryDesk is a hobby project by DrWeabo, with no ads and no paid tier. If it helps you, you can [donate](https://trydesk.ai.id/donate/) for the server costs, report a bug, or tell a friend.
 
 ## License
 
-Copyright © 2026 DrWeabo. TryDesk is free software under the
-**GNU Affero General Public License v3.0** ([`LICENSE`](LICENSE), see also
-[`NOTICE`](NOTICE)): you may use, study, modify and share it for free. If you
-distribute a modified version — or let people use it over a network — you must
-publish its source code under the same licence and keep the copyright notices and
-the "Made by DrWeabo" credit.
-
-TryDesk 1.1.1 and earlier were released under the MIT License; 1.2.0 and later
-are AGPL-3.0-only.
-
-The **TryDesk name and logo are trademarks** and are not covered by the licence:
-modified versions must use their own name. See [`TRADEMARK.md`](TRADEMARK.md).
-Official downloads: [trydesk.ai.id](https://trydesk.ai.id).
-</content>
+Copyright © 2026 DrWeabo. TryDesk 1.2.0 and later are free software under the [GNU AGPL v3.0](LICENSE) (1.1.1 and earlier were MIT). If you share a modified version, or let people use it over a network, publish its source under the same licence and keep the "Made by DrWeabo" credit. The TryDesk name and logo are trademarks and are not covered by the licence; see [`TRADEMARK.md`](TRADEMARK.md).

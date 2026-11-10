@@ -213,7 +213,7 @@ const I18N = {
     lang_changed: "Bahasa diubah ke Indonesia",
     delete_tip: "Hapus dari riwayat",
     time_now: "Baru saja", time_min: "menit lalu", time_hour: "jam lalu", time_day: "hari lalu",
-    id_regenerated: "ID baru berhasil dibuat", ui_regen_id_title: "Buat ID baru", regen_failed: "Gagal membuat ID baru",
+    id_regenerated: "ID baru berhasil dibuat", ui_regen_id_title: "Buat ID baru", regen_failed: "Gagal membuat ID baru", regen_svc_wait: "ID PC ini dipegang layanan Windows: setujui izin administrator untuk membuat ID baru", regen_svc_cancel: "ID tidak diganti: izin administrator tidak diberikan",
     regen_confirm_title: "Buat ID baru?", regen_confirm_ok: "Ya, buat ID baru", regen_confirm_cancel: "Batal",
     regen_confirm_msg: "ID lama Anda akan berhenti berlaku.",
     regen_confirm_detail: "Orang yang menyimpan ID lama tidak bisa tersambung lagi dan harus diberi ID yang baru. Sesi yang sedang berjalan akan terputus.",
@@ -248,7 +248,7 @@ const I18N = {
     lang_changed: "Language changed to English",
     delete_tip: "Remove from history",
     time_now: "Just now", time_min: "min ago", time_hour: "h ago", time_day: "d ago",
-    id_regenerated: "New ID generated", ui_regen_id_title: "Generate new ID", regen_failed: "Failed to generate new ID",
+    id_regenerated: "New ID generated", ui_regen_id_title: "Generate new ID", regen_failed: "Failed to generate new ID", regen_svc_wait: "This PC's ID belongs to the Windows service: approve the administrator prompt to get a new ID", regen_svc_cancel: "ID not changed: administrator permission was not given",
     regen_confirm_title: "Generate a new ID?", regen_confirm_ok: "Yes, generate new ID", regen_confirm_cancel: "Cancel",
     regen_confirm_msg: "Your current ID will stop working.",
     regen_confirm_detail: "Anyone who saved the old ID can no longer connect and needs the new one. A running session will disconnect.",
@@ -502,6 +502,9 @@ const TEXT_EN = {
   "Batas waktu sesi di PC remote tercapai, koneksi diputus": "The remote PC's session time limit was reached, disconnected",
   "Koneksi P2P gagal, coba protokol Otomatis (Pengaturan → Koneksi) agar bisa lewat relay": "P2P connection failed, try the Automatic protocol (Settings → Connection) so it can use the relay",
   "Untuk mengirim file, klik tombol Kirim File": "To send a file, click the Send File button",
+  "Sambungkan dulu ke PC lain, lalu seret file ke layarnya untuk mengirim": "Connect to another PC first, then drag files onto its screen to send them",
+  "Folder belum bisa dikirim: seret file-filenya": "Folders can't be sent yet: drag the files themselves",
+  "Lepas untuk mengirim file": "Drop to send the files",
   "Untuk mengirim file, buka Control Center → Fitur lainnya → Transfer file": "To send a file, open Control Center → More features → File transfer",
   "PC mengirim file, tetapi aplikasi HP belum bisa menerima file": "The PC sent a file, but the phone app can't receive files yet",
   "Ditolak: aplikasi HP belum bisa menerima file": "Declined: the phone app can't receive files yet",
@@ -1319,7 +1322,7 @@ async function refreshServiceState() {
   svcId = next;
   myIdText.textContent = shownId() ? fmtId(shownId()) : "…";
   try { window.electronAPI.setTrayInfo?.({ id: shownId() ? fmtId(shownId()) : "" }); } catch {}
-  $("#btn-regen-id")?.classList.toggle("hidden", svcId !== null);
+  { const el = $("#set-my-id"); if (el) el.textContent = shownId() ? fmtId(shownId()) : "-"; }
   // The service's host darkens this screen now, so it needs the panic key (Ctrl+Alt+Shift+Esc), not this app.
   if (switched) { try { window.electronAPI.panicKeyYield?.(svcId !== null); } catch {} }
   if (switched && ws) connectSignaling();   // the other identity
@@ -4296,11 +4299,11 @@ function fileBusy(sess) { return !!(sess.activeSend || sess.activeRecv); }
 
 async function chooseSavePath(name) { return window.electronAPI.fileSaveDialog(name); }
 
-async function startSendFiles() {
-  const sess = curChatSess();
-  if (sess && sess.mirror) return svcMirrorSendFiles();   // the service's session: the service sends it
+async function startSendFiles(dropped, toSess) {
+  const sess = toSess || curChatSess();
+  if (sess && sess.mirror) return svcMirrorSendFiles(dropped);   // the service's session: the service sends it
   if (!sess || !sess.fileChannel || sess.fileChannel.readyState !== "open") return showToast("Belum siap untuk transfer");
-  const files = await window.electronAPI.filePick();
+  const files = dropped || await window.electronAPI.filePick();
   for (const f of files) {
     if (fileBusy(sess)) { showToast("Satu transfer dulu, lalu ulangi"); break; }
     await sendOneFile(sess, f);
@@ -5847,8 +5850,8 @@ function svcMirrorXfers(list) {
   for (const [id, m] of svcMirrorCards) if (!seen.has(id)) { if (m.state !== "ok" && m.state !== "fail") m.card.remove(); svcMirrorCards.delete(id); }
 }
 // Send from this TryDesk during the service's session: the picked files go to the outbox one by one.
-async function svcMirrorSendFiles() {
-  const files = await window.electronAPI.filePick();
+async function svcMirrorSendFiles(dropped) {
+  const files = dropped || await window.electronAPI.filePick();
   for (const f of files) {
     let r = null; try { r = await window.electronAPI.svcOutboxPut(f.path); } catch {}
     if (!r) { showToast("File tidak bisa disiapkan untuk dikirim"); continue; }
@@ -6401,8 +6404,8 @@ $("#clipboard-toggle").addEventListener("change", (e) => {
 });
 
 // File transfer buttons
-$("#btn-send-file").addEventListener("click", startSendFiles);
-$("#btn-host-send-file").addEventListener("click", startSendFiles);
+$("#btn-send-file").addEventListener("click", () => startSendFiles());
+$("#btn-host-send-file").addEventListener("click", () => startSendFiles());
 
 // Audio + monitor
 $("#btn-audio").addEventListener("click", toggleAudio);
@@ -6486,17 +6489,42 @@ async function regenerateId() {
     } else { ok = window.confirm(t("regen_confirm_msg") + "\n\n" + t("regen_confirm_detail")); }
   } catch { ok = false; }
   if (!ok) return;
-  // End any live sessions first,they belong to the OLD id,and any request still being answered.
+  // With the Windows service this PC's ID is the service's (Home shows it): the service gets the new one, after an
+  // administrator's yes (UAC). Before 9 Nov this dropped an ID nobody used and showed the app's second ID as "new".
+  if (svcId !== null && !(config && config.serviceHost)) return regenerateServiceId();
+  dropIdentityAndReconnect();
+}
+// End any live sessions first (they belong to the OLD id) and any request still being answered, then sign in with no
+// stored identity: the server issues a fresh id+token.
+function dropIdentityAndReconnect() {
   try { for (const s of [...sessions.values()]) closeSession(s, true); } catch {}
   try { if (host) closeSession(host, true); } catch {}
   try { if (acceptDlgCancel) acceptDlgCancel(); } catch {}
   if (pendingChallenge) { clearTimeout(pendingChallenge._t); pendingChallenge = null; }
-  // Forget the identity; a fresh WebSocket has no clientId, so register() assigns a new id+token.
   store.set("myId", null); store.set("myToken", null);
   myId = null; _regenPending = true;
   myIdText.textContent = "…";
   setStatus("", t("connecting_server"));
   connectSignaling();
+}
+// The service's host: an administrator asked for a new ID (main.js watches %ProgramData%\TryDesk\regen-id.req).
+window.electronAPI?.onSvcRegenId?.(() => { if (config && config.serviceHost) { store.set("svcAdopted", "1"); dropIdentityAndReconnect(); } });
+async function regenerateServiceId() {
+  const before = svcId;
+  showToast(t("regen_svc_wait"));
+  let r = null; try { r = await window.electronAPI.serviceRegenId(); } catch {}
+  if (!r || !r.ok) { showToast(r && r.code === 1223 ? t("regen_svc_cancel") : t("regen_failed")); return; }
+  // The old ID is retired: the app's copy and identity.json must not bring it back later (service removed, restart).
+  store.set("myId", null); store.set("myToken", null);
+  try { window.electronAPI.forgetIdentity?.(); } catch {}
+  myIdText.textContent = "…";
+  for (let i = 0; i < 30; i++) {
+    await new Promise((res) => setTimeout(res, 1000));
+    await refreshServiceState();
+    if (svcId && svcId !== before) { showToast(t("id_regenerated") + ": " + fmtId(svcId)); return; }
+  }
+  myIdText.textContent = shownId() ? fmtId(shownId()) : "…";
+  showToast(t("regen_failed"));
 }
 $("#btn-regen-id")?.addEventListener("click", regenerateId);
 
@@ -6704,7 +6732,9 @@ $("#btn-settings-close").addEventListener("click", toggleSettings);
   const sync = () => {
     const open = !overlaySettings.classList.contains("hidden");
     if (tbName && !isPhoneUi()) tbName.textContent = open ? "Pengaturan" : "TryDesk";
-    if (open) { const el = $("#set-my-id"); if (el) el.textContent = myId ? fmtId(myId) : "-"; }
+    // The ID others connect to: the service's while it runs (myId is then the app's second ID, used only to
+    // control other PCs; showing it here gave two different IDs, owner's picture 8 Nov).
+    if (open) { const el = $("#set-my-id"); if (el) el.textContent = shownId() ? fmtId(shownId()) : "-"; }
   };
   new MutationObserver(sync).observe(overlaySettings, { attributes: true, attributeFilter: ["class"] });
   $("#btn-regen-id-2")?.addEventListener("click", () => $("#btn-regen-id").click());
@@ -6751,15 +6781,32 @@ $("#setting-allow-file")?.addEventListener("change", (e) => { allowFileTransfer 
 $("#setting-allow-clipboard")?.addEventListener("change", (e) => { allowClipboardPref = e.target.checked; store.set("allowClipboard", allowClipboardPref ? "1" : "0"); hostPermsChanged(); });
 $("#setting-allow-viewonly")?.addEventListener("change", (e) => { forceViewOnly = e.target.checked; store.set("forceViewOnly", forceViewOnly ? "1" : "0"); hostPermsChanged(); });
 
-// A file dropped on the window must never navigate it away (main blocks that too); point at the real way to send.
-for (const type of ["dragover", "drop"]) {
-  window.addEventListener(type, (e) => {
-    e.preventDefault();
-    if (type === "drop" && e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
-      showToast(onHostingScreen() ? "Untuk mengirim file, klik tombol Kirim File" : "Untuk mengirim file, buka Control Center → Fitur lainnya → Transfer file");
-    }
-  });
+// Drag and drop (users' reports 9 Nov: "can't drag and drop files while remoting"). Files dropped on the remote screen
+// go to that PC; dropped on "this PC is being controlled" they go to the viewer. Same offer and Accept card as Send
+// file. A drop never navigates the window away (main blocks that too).
+function dropTarget() {
+  if (config && config.serviceHost) return null;
+  if (!$("#screen-remote").classList.contains("hidden") && active && active.role === "viewer") return active;
+  if (onHostingScreen()) return host || svcMirror;
+  return null;
 }
+const isFileDrag = (e) => !!(e.dataTransfer && [...(e.dataTransfer.types || [])].includes("Files"));
+let _dragDepth = 0;
+const setDropReady = (on) => { const h = document.documentElement; h.dataset.drop = lang === "en" ? "Drop to send the files" : "Lepas untuk mengirim file"; h.classList.toggle("drop-ready", on); };
+window.addEventListener("dragenter", (e) => { if (!isFileDrag(e)) return; e.preventDefault(); _dragDepth++; if (dropTarget()) setDropReady(true); });
+window.addEventListener("dragleave", (e) => { if (!isFileDrag(e)) return; if (--_dragDepth <= 0) { _dragDepth = 0; setDropReady(false); } });
+// "copy" even without a session, so the drop arrives and can say what to do instead of a silent no-entry cursor.
+window.addEventListener("dragover", (e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = isFileDrag(e) ? "copy" : "none"; });
+window.addEventListener("drop", async (e) => {
+  e.preventDefault(); _dragDepth = 0; setDropReady(false);
+  const list = e.dataTransfer && e.dataTransfer.files;
+  if (!list || !list.length) return;
+  const sess = dropTarget();
+  if (!sess) return showToast("Sambungkan dulu ke PC lain, lalu seret file ke layarnya untuk mengirim");
+  let r = null; try { r = await window.electronAPI.filesDropped?.([...list]); } catch {}   // File objects cross the bridge, a FileList does not
+  if (r && r.skipped) showToast("Folder belum bisa dikirim: seret file-filenya");
+  if (r && r.files && r.files.length) startSendFiles(r.files, sess.mirror ? null : sess);
+});
 
 // ─── Update check ─────────────────────────────────────────
 // version.json on the website (see main.js check-update): a newer release gets a dismissable notice on the home
@@ -6838,7 +6885,19 @@ $("#update-dismiss").addEventListener("click", () => { if (updateInfo) store.set
     await adopt();
     const t = setInterval(() => { if (store.get("svcAdopted") === "1") clearInterval(t); else adopt(); }, 10000);
   } else {
+    // This PC's own ID lost from storage (closed hard right after its first sign-in): take it back from identity.json.
+    if (!window.TD_MOBILE && !store.get("myToken")) {
+      let j = null; try { j = await window.electronAPI.readIdentity?.(); } catch {}
+      if (j) { store.set("myId", j.id); store.set("myToken", j.token); try { window.electronAPI.logInfo("ID restored from identity.json"); } catch {} }
+    }
     await refreshServiceState();
+    // Setup installs the service before the new app ever opened, so identity.json did not exist yet and the service
+    // signed in with a NEW ID ("the ID changed after the update", Threads T21). The app never wrote it while the
+    // service ran: write this PC's own ID now, and the service (still waiting to adopt one) takes it over.
+    if (svcId !== null && !window.TD_MOBILE && store.get("myId") && store.get("myToken")) {
+      let j = null; try { j = await window.electronAPI.readIdentity?.(); } catch {}
+      if (!j) { try { window.electronAPI.exportIdentity(store.get("myId"), store.get("myToken")); } catch {} }
+    }
     try { onSvcUi(await window.electronAPI.svcUiNow?.()); } catch {}   // a service session already running at start
   }
   checkUpdate(); setInterval(checkUpdate, 6 * 3600 * 1000);   // at start, then every 6 hours

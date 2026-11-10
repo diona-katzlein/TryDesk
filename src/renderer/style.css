@@ -342,6 +342,10 @@ html:not(.td-mobile) .sess-tab.active .sess-count { color: var(--accent-text); }
 /* Access-password prompt (host asked again: no password typed, or a wrong one). While it is open the screen is just
    this form, like a sign-in page: the ring, the heading and the steps make way. */
 .connecting-container:has(.connect-pw:not(.hidden)) > :is(.connect-anim, #connecting-title, #connecting-text, .connect-steps) { display: none; }
+/* Files dragged over a session (remote screen, or "being controlled"): a 2 px red frame and one line saying what a
+   drop does. Pointer events stay off so the drop lands on the window underneath. */
+html.drop-ready::after { content: attr(data-drop); position: fixed; inset: 8px; z-index: 300; pointer-events: none; display: flex; align-items: flex-end; justify-content: center; padding-bottom: 24px; border: 2px solid var(--accent); border-radius: 12px; background: var(--accent-soft); color: #fff; font: 600 14px var(--f, 'Inter', sans-serif); text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6); }
+
 /* The service's host window (SYSTEM, see main.js): only the Accept dialog and the "being controlled" screen. No home
    screen behind the dialog, no settings, no sending files. Maximize and X stay, as on every window (owner, 8 Nov: "can't
    close it, can't maximize it, strange"): X is Reject while a request waits and Disconnect during a session. */

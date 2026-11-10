@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 contextBridge.exposeInMainWorld("electronAPI", {
   getConfig: () => ipcRenderer.invoke("get-config"),
@@ -18,6 +18,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
   serviceUserIdentity: () => ipcRenderer.invoke("service-user-identity"),
   serviceSetPassword: (hash) => ipcRenderer.invoke("service-set-password", String(hash || "")),
   exportIdentity: (id, token) => ipcRenderer.send("export-identity", { id: String(id || ""), token: String(token || "") }),
+  readIdentity: () => ipcRenderer.invoke("read-identity"),
+  forgetIdentity: () => ipcRenderer.send("forget-identity"),
+  serviceRegenId: () => ipcRenderer.invoke("service-regen-id"),
+  onSvcRegenId: (cb) => ipcRenderer.on("svc-regen-id", () => cb()),
   // The user's language, so the service's window (SYSTEM, which has no language of its own) speaks it too.
   exportUiLang: (l) => ipcRenderer.send("export-ui-lang", l === "en" ? "en" : "id"),
   serviceUserLang: () => ipcRenderer.invoke("service-user-lang"),
@@ -80,6 +84,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   clipboardWrite: (text) => ipcRenderer.invoke("clipboard-write", text),
 
   filePick: () => ipcRenderer.invoke("file-pick"),
+  // Files dropped on the window: only real dropped File objects have a path (webUtils), so the page can't name one.
+  filesDropped: (files) => ipcRenderer.invoke("file-dropped", Array.from(files || []).slice(0, 50).map((f) => { try { return webUtils.getPathForFile(f); } catch { return ""; } }).filter(Boolean)),
   fileSaveDialog: (name) => ipcRenderer.invoke("file-save-dialog", name),
   fileOpenRead: (p) => ipcRenderer.invoke("file-open-read", p),
   fileReadChunk: (id, length) => ipcRenderer.invoke("file-read-chunk", { id, length }),
