@@ -504,6 +504,7 @@ const TEXT_EN = {
   "Untuk mengirim file, klik tombol Kirim File": "To send a file, click the Send File button",
   "Sambungkan dulu ke PC lain, lalu seret file ke layarnya untuk mengirim": "Connect to another PC first, then drag files onto its screen to send them",
   "Folder belum bisa dikirim: seret file-filenya": "Folders can't be sent yet: drag the files themselves",
+  "Sebagian file tidak dikirim: hanya file yang ada di disk (paling banyak 50 sekaligus)": "Some files weren't sent: only files on disk can be sent (up to 50 at once)",
   "Lepas untuk mengirim file": "Drop to send the files",
   "Untuk mengirim file, buka Control Center → Fitur lainnya → Transfer file": "To send a file, open Control Center → More features → File transfer",
   "PC mengirim file, tetapi aplikasi HP belum bisa menerima file": "The PC sent a file, but the phone app can't receive files yet",
@@ -6502,26 +6503,36 @@ function dropIdentityAndReconnect() {
   try { if (acceptDlgCancel) acceptDlgCancel(); } catch {}
   if (pendingChallenge) { clearTimeout(pendingChallenge._t); pendingChallenge = null; }
   store.set("myId", null); store.set("myToken", null);
+  // identity.json too, or a TryDesk closed before the new ID arrives would take the old one back at its next start
+  // (review 10 Nov). The service's host keeps no identity.json of its own (main.js ignores this there).
+  if (!(config && config.serviceHost)) { try { window.electronAPI.forgetIdentity?.(); } catch {} }
   myId = null; _regenPending = true;
   myIdText.textContent = "…";
   setStatus("", t("connecting_server"));
   connectSignaling();
 }
 // The service's host: an administrator asked for a new ID (main.js watches %ProgramData%\TryDesk\regen-id.req).
-window.electronAPI?.onSvcRegenId?.(() => { if (config && config.serviceHost) { store.set("svcAdopted", "1"); dropIdentityAndReconnect(); } });
+window.electronAPI?.onSvcRegenId?.(() => {
+  if (!(config && config.serviceHost)) return;
+  try { window.electronAPI.svcRegenAck?.(); } catch {}   // main deletes the request file only now
+  store.set("svcAdopted", "1"); dropIdentityAndReconnect();
+});
 async function regenerateServiceId() {
   const before = svcId;
   showToast(t("regen_svc_wait"));
   let r = null; try { r = await window.electronAPI.serviceRegenId(); } catch {}
   if (!r || !r.ok) { showToast(r && r.code === 1223 ? t("regen_svc_cancel") : t("regen_failed")); return; }
-  // The old ID is retired: the app's copy and identity.json must not bring it back later (service removed, restart).
-  store.set("myId", null); store.set("myToken", null);
-  try { window.electronAPI.forgetIdentity?.(); } catch {}
   myIdText.textContent = "…";
   for (let i = 0; i < 30; i++) {
     await new Promise((res) => setTimeout(res, 1000));
     await refreshServiceState();
-    if (svcId && svcId !== before) { showToast(t("id_regenerated") + ": " + fmtId(svcId)); return; }
+    if (svcId && svcId !== before) {
+      // Only now is the old ID retired: the app's copy and identity.json must not bring it back later (service
+      // removed, restart). Before the service confirmed, a failure would have cost the PC its ID (review 10 Nov).
+      if (store.get("myId") === before) { store.set("myId", null); store.set("myToken", null); }
+      try { window.electronAPI.forgetIdentity?.(); } catch {}
+      showToast(t("id_regenerated") + ": " + fmtId(svcId)); return;
+    }
   }
   myIdText.textContent = shownId() ? fmtId(shownId()) : "…";
   showToast(t("regen_failed"));
@@ -6804,8 +6815,12 @@ window.addEventListener("drop", async (e) => {
   const sess = dropTarget();
   if (!sess) return showToast("Sambungkan dulu ke PC lain, lalu seret file ke layarnya untuk mengirim");
   let r = null; try { r = await window.electronAPI.filesDropped?.([...list]); } catch {}   // File objects cross the bridge, a FileList does not
-  if (r && r.skipped) showToast("Folder belum bisa dikirim: seret file-filenya");
-  if (r && r.files && r.files.length) startSendFiles(r.files, sess.mirror ? null : sess);
+  const sent = (r && r.files && r.files.length) || 0;
+  // Not sent: folders, plus anything with no file on disk (dragged out of a zip, a browser, an e-mail), unreadable,
+  // or past the first 50 (review 10 Nov: these used to vanish without a word).
+  if (r && r.folders) showToast("Folder belum bisa dikirim: seret file-filenya");
+  else if (list.length > sent) showToast("Sebagian file tidak dikirim: hanya file yang ada di disk (paling banyak 50 sekaligus)");
+  if (sent) startSendFiles(r.files, sess.mirror ? null : sess);
 });
 
 // ─── Update check ─────────────────────────────────────────
@@ -6876,7 +6891,8 @@ $("#update-dismiss").addEventListener("click", () => { if (updateInfo) store.set
     const adopt = async () => {
       if (store.get("svcAdopted") === "1") return;
       let u = null; try { u = await window.electronAPI.serviceUserIdentity(); } catch {}
-      if (!u || host || acceptPending) return;
+      // Checked again after the wait: a new ID requested meanwhile must not be undone by the old one (review 10 Nov).
+      if (!u || host || acceptPending || store.get("svcAdopted") === "1") return;
       store.set("svcAdopted", "1");
       if (u.id === store.get("myId")) return;
       store.set("myId", u.id); store.set("myToken", u.token);

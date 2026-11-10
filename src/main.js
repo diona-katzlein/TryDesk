@@ -964,8 +964,8 @@ ipcMain.on("service-id", (_e, id) => {
 // service password: one UAC prompt drops a request file in %ProgramData%\TryDesk (SYSTEM/Administrators write only),
 // and the service's host, which watches it, signs in fresh.
 const _regenReqFile = path.join(_serviceDir, "regen-id.req");
-ipcMain.handle("service-regen-id", () => new Promise((resolve) => {
-  if (process.platform !== "win32" || _serviceHost) return resolve({ ok: false, code: -1 });
+ipcMain.handle("service-regen-id", (e) => new Promise((resolve) => {
+  if (process.platform !== "win32" || _serviceHost || !fromMain(e)) return resolve({ ok: false, code: -1 });
   // Fixed text, no input from anywhere: the elevated PowerShell finds the folder from its own %ProgramData%.
   const inner = Buffer.from("Set-Content -LiteralPath (Join-Path $env:ProgramData 'TryDesk\\regen-id.req') -Value 1 -ErrorAction Stop", "utf16le").toString("base64");
   const ps = require("child_process").spawn("powershell.exe", ["-NoProfile", "-WindowStyle", "Hidden", "-Command",
@@ -974,23 +974,32 @@ ipcMain.handle("service-regen-id", () => new Promise((resolve) => {
   ps.on("exit", (code) => { logInfo("service regen-id request exit " + code); resolve({ ok: code === 0, code }); });
   ps.on("error", () => resolve({ ok: false, code: 1 }));
 }));
+// The request file is removed only once the page confirms it acted on it (a page still loading would miss the message),
+// and a file older than 2 minutes is dropped unread: the app that asked has given up by then, and an old request must
+// not end a session hours later when the host starts again (review 10 Nov).
+let _regenSentAt = 0;
+const _dropRegenReq = () => { try { fs.unlinkSync(_regenReqFile); } catch {} };
 if (_serviceHost) app.whenReady().then(() => setInterval(() => {
-  if (!fs.existsSync(_regenReqFile)) return;
-  try { fs.unlinkSync(_regenReqFile); } catch { return; }
+  let st = null; try { st = fs.statSync(_regenReqFile); } catch { return; }
+  if (Date.now() - st.mtimeMs > 120000) { _dropRegenReq(); logInfo("service host: stale new-ID request ignored"); return; }
+  if (Date.now() - _regenSentAt < 5000) return;
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading()) return;
+  _regenSentAt = Date.now();
   logInfo("service host: new ID requested by an administrator");
-  try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("svc-regen-id"); } catch {}
+  try { mainWindow.webContents.send("svc-regen-id"); } catch {}
 }, 1000));
+ipcMain.on("svc-regen-ack", (e) => { if (_serviceHost && fromMain(e)) { _dropRegenReq(); _regenSentAt = 0; } });
 // The app's own identity back from identity.json when its storage lost it: localStorage reaches the disk a few
 // seconds late, so a TryDesk closed hard right after its first sign-in (an update's installer, a crash, power off)
 // came back with a new ID (Threads report T21, proven 9 Nov). identity.json is written at once.
-ipcMain.handle("read-identity", () => {
-  if (_serviceHost) return null;
+ipcMain.handle("read-identity", (e) => {
+  if (_serviceHost || !fromMain(e)) return null;
   const j = readIdentityFile();
   return ID_RE.test(j.id) && TOKEN_RE.test(j.token) ? { id: j.id, token: j.token } : null;
 });
 // After the service got a new ID the old one is retired: nothing may bring it back (keeps the language).
-ipcMain.on("forget-identity", () => {
-  if (_serviceHost) return;
+ipcMain.on("forget-identity", (e) => {
+  if (_serviceHost || !fromMain(e)) return;
   const lang = readIdentityFile().lang;
   try { fs.writeFileSync(_identityFile, JSON.stringify(lang ? { lang } : {})); } catch {}
 });
@@ -1573,18 +1582,19 @@ ipcMain.handle("file-pick", async () => {
 });
 
 // Drag and drop (users' reports 9 Nov): files dropped on the window count as picked, like the Open dialog. Folders and
-// anything that is not a plain file are left out (the renderer says so).
+// anything that can't be read are left out, and counted apart so the renderer can say which (folders, or unreadable).
 ipcMain.handle("file-dropped", (e, paths) => {
-  if (_serviceHost || !fromMain(e) || !Array.isArray(paths)) return { files: [], skipped: 0 };   // SYSTEM's window sends nothing it was handed
-  const files = []; let skipped = 0;
+  if (_serviceHost || !fromMain(e) || !Array.isArray(paths)) return { files: [], folders: 0, unreadable: 0 };   // SYSTEM's window sends nothing it was handed
+  const files = []; let folders = 0, unreadable = 0;
   for (const p of paths.slice(0, 50)) {
-    if (typeof p !== "string" || !path.isAbsolute(p)) { skipped++; continue; }
+    if (typeof p !== "string" || !path.isAbsolute(p)) { unreadable++; continue; }
     let st = null; try { st = fs.statSync(p); } catch {}
-    if (!st || !st.isFile()) { skipped++; continue; }
+    if (st && st.isDirectory()) { folders++; continue; }
+    if (!st || !st.isFile()) { unreadable++; continue; }
     _pickedPaths.add(p);
     files.push({ path: p, name: path.basename(p), size: st.size });
   }
-  return { files, skipped };
+  return { files, folders, unreadable };
 });
 
 ipcMain.handle("file-save-dialog", async (_e, name) => {

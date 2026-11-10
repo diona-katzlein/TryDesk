@@ -77,7 +77,7 @@ Each app gets a 9-digit ID from the signaling server. You type the other PC's ID
   <img src="docs/readme/en/chat.webp" alt="Chat panel next to the remote screen" width="49%">
 </p>
 
-Copy files both ways in a two-panel file manager, and chat with the person on the other side without leaving the session.
+Copy files both ways in a two-panel file manager, or drag a file onto the remote screen to send it. Chat with the person on the other side without leaving the session.
 
 <p>
   <img src="docs/readme/en/quality.webp" alt="Picture quality settings in Control Center" width="49%">

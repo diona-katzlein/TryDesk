@@ -87,7 +87,7 @@ Di Windows Sandbox dan VM Hyper-V, TryDesk otomatis berjalan tanpa akselerasi GP
   - Frame rate 30/60/120/144/165/180/240 (sampai 240 FPS; tergantung spek & refresh-rate PC), Resolusi Asli/1080p/720p/480p
   - Codec AV1/VP9/VP8/H.264 (ganti = renegosiasi sesaat)
   - Overlay statistik: bitrate, FPS, latency, packet loss, resolusi, jalur (P2P/relay), codec
-- **File**: kirim file dua arah, streaming + progress, penerima klik Terima/Tolak dan pilih lokasi simpan.
+- **File**: kirim file dua arah, streaming + progress, penerima klik Terima/Tolak dan pilih lokasi simpan. Sejak 1.3.8 file juga bisa diseret ke layar remote (atau ke layar "sedang dikontrol" di PC yang dikontrol); folder belum bisa.
 - **Clipboard**: teks tersinkron otomatis dua arah (bisa dimatikan di panel Kualitas).
 - **Monitor**: pemilih muncul bila remote punya >1 layar; ganti monitor tanpa putus. Bila sebuah monitor tak terbaca oleh capturer bawaan Windows (mis. HDR aktif / monitor di GPU lain), TryDesk otomatis restart sekali memakai Windows Graphics Capture.
 - **Audio**: dengarkan suara sistem PC remote (jika tersedia).

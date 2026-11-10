@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   forgetIdentity: () => ipcRenderer.send("forget-identity"),
   serviceRegenId: () => ipcRenderer.invoke("service-regen-id"),
   onSvcRegenId: (cb) => ipcRenderer.on("svc-regen-id", () => cb()),
+  svcRegenAck: () => ipcRenderer.send("svc-regen-ack"),
   // The user's language, so the service's window (SYSTEM, which has no language of its own) speaks it too.
   exportUiLang: (l) => ipcRenderer.send("export-ui-lang", l === "en" ? "en" : "id"),
   serviceUserLang: () => ipcRenderer.invoke("service-user-lang"),
