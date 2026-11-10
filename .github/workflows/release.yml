@@ -1,0 +1,74 @@
+# Build the Windows app, sign it with SignPath (free for approved open-source projects),
+# and attach the SIGNED installers to a GitHub Release.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# ONE-TIME SETUP:
+#   1) Push this repo to GitHub and make it PUBLIC.
+#   2) Apply to SignPath Foundation (free OSS signing):  https://signpath.org/apply
+#      — you get an ORGANIZATION ID and a signing POLICY.
+#   3) In SignPath: connect this GitHub repo, create a PROJECT for it, and add an
+#      ARTIFACT CONFIGURATION that signs the *.exe files inside the uploaded zip.
+#   4) Add the repo secret  SIGNPATH_API_TOKEN  (GitHub → Settings → Secrets and
+#      variables → Actions → New repository secret).
+#   5) Fill the three slugs marked TODO below to match your SignPath org/project/policy.
+# Until all of that exists, the SignPath step just fails — the UNSIGNED build still
+# uploads as a workflow artifact, so nothing is lost while you wait for approval.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Release (build + sign)
+
+on:
+  push:
+    tags: ["v*"]            # push a tag like v1.0.1 to cut a signed release
+  workflow_dispatch: {}     # or run it by hand from the Actions tab
+
+permissions:
+  contents: write           # create the GitHub Release
+  actions: read             # let the SignPath action download the build artifact
+
+jobs:
+  build-and-sign:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # keep the write token out of .git/config, away from npm install scripts
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22        # Electron 45 / @electron/rebuild need Node >= 22.12
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Windows app (unsigned)
+        run: npm run build        # -> dist/TryDesk-Portable.exe, dist/TryDesk-Setup-<ver>.exe
+
+      - name: Upload unsigned build as a workflow artifact
+        id: unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: trydesk-unsigned
+          path: dist/*.exe
+          if-no-files-found: error
+
+      # ── SignPath signing (only runs once the one-time setup above is done) ──
+      - name: Submit signing request to SignPath
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          github-token: ${{ github.token }}                 # lets SignPath fetch the artifact
+          organization-id: "TODO-your-signpath-organization-id"
+          project-slug: "trydesk"                           # TODO: your SignPath project slug
+          signing-policy-slug: "release-signing"            # TODO: your SignPath policy slug
+          # artifact-configuration-slug: "exe"              # uncomment + set if you named one
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: "dist-signed"
+
+      - name: Publish SIGNED installers to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist-signed/*.exe
+          fail_on_unmatched_files: true
